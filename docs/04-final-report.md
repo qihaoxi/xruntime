@@ -66,6 +66,8 @@
 - **中并发(M=4)**:+8%(spin)/**+15~40%(park,S8 修正口径)**;
 - **高并发饱和(M=16, unpaced)**:futex 中性偏正(spin M=16 中位 +18%,
   噪声大),但 B2 unpaced -11%——**transport 与合并度此消彼长**;
+- **等待粒度(U9)**:driver 在途窗口 B=8 → **+4~8×**(p50 恒定,p99 批尾);
+  park 次数与吞吐近似反比,是 c=1 的主成本(§3.7);
 - 同线程:futex 无差异(不睡眠路径),MPSC 队列 -45%。
 
 ## 3. 问题三:回灌 PEL 还是另立运行时?
@@ -159,6 +161,28 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 - **未测**:真实 PEL vstack(slot pool/madvise/零页语义)下的 VMA/TLB/RSS,
   本次为下限;高频 per-request 创建形态未建 bench。
 
+### 3.7 park 次数削减曲线(U9,2026-10-03)
+
+> 问题:每请求 park 次数是否是最大成本?`bench_echo --batch B` 让 driver
+> 每 B 个完成才 park 一次(在途窗口 B),同机制/同 L0,只改等待粒度。
+
+| B(K=16,M=4,V5,stackless) | rps | p50 | p99 | driver-parks/req | futex/req |
+|---|---|---|---|---|---|
+| 1(旧口径) | 0.82M | 4.5µs | 20µs | 1.00 | 0.50 |
+| 4 | 3.2–3.4M | 4.0–4.3µs | 24µs | 0.25 | 0.12 |
+| 8 | 6.2–6.4M | 4.2µs | 21µs | 0.12 | 0.04–0.06 |
+| 64 | 6.2–10.1M(方差大) | 4.4–5.4µs | 154–697µs | 0.002–0.003 | 0.004–0.011 |
+
+- **吞吐随 park 次数近似反比**:1→1/8 → **+4~8×**;p50 恒定(完成延迟
+  不退化),p99 随 B 增长(B=64 批尾);B≥8 后受剩余 conn 唤醒/队列成本限;
+- **L0 无关**:fibre B=1 0.81M、B=8 5.7–7.1M,与 stackless 同曲线;
+- transport 仍可见:eventfd B=8 3.8–5.5M vs futex B=8 6.2–6.4M;
+- **结论**:每请求 park 次数是 c=1 的主成本,且可由"等待粒度"削减——
+  对 PEL 的对应手段 = **try-before-park**(消 ready 侧 park)+ **write
+  快路径**(消 send park)+ **批量提交/等待** + **io_uring**(一次 enter
+  管 N op);代价是 p99 批尾与 API 语义(背压/完成粒度)变化,B=4~8 是
+  延迟/吞吐折中点。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -170,6 +194,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S6 | B3 echo:spin M=1 +602%、park +15~40%(S8 修正) | `bench-logs/bench_echo-20261003-*` |
 | S7 | L0 对照:cross V0 +1.4~2.0%、V5 排序不变、创建 51×、切换 5.6ns | `bench-logs/bench_{roundtrip,l0}-20261003-0240*` |
 | S8 | park 口径 bug 修正 + fibre echo 对照 + ring 驻留/TLB/VMA | `bench-logs/bench_{echo,l0}-20261003-0310*`、`perf-tlb-20261003-031138.log` |
+| S9 | park 次数削减曲线:B=1→8 吞吐 +4~8×、p50 恒定、parks/req 1→0.12 | `bench-logs/bench_echo-20261003-0341*` |
 
 ## 5. 风险与边界
 

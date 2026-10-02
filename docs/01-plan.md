@@ -237,6 +237,23 @@ S8 验证(L0-b:park 口径修正 + 每请求 park 次数 + 驻留/TLB;
 - 日志:`bench-logs/bench_{echo,l0}-20261003-0310*`、
   `bench-logs/perf-tlb-20261003-031138.log`。
 
+S9 验证(park 次数削减曲线,U9;2026-10-03,release):
+- `bench_echo --batch B`:driver 在途窗口 B(每 B 个 ack 才 park 一次;
+  B=1 与旧口径等价);ack 按完成序近似归因到最早未记账请求。修 fibre
+  批处理死锁:补窗口必须在记账之后(否则 `posted-done` 不释放,1:1 只发
+  1 个请求就等第 2 个 ack)。
+- K=16,M=4,V5(stackless):rps **0.82M(B=1)→3.2~3.4M(B=4)→6.2~6.4M
+  (B=8)→6.2~10.1M(B=64,方差大)**;driver-parks/req 1.00→0.25→0.12→
+  0.002~0.003;p50 恒定 ~4.2µs(B=64 4.4~5.4),p99 B=64 154~697µs(批尾);
+  futex/req 0.50→0.004。
+- L0:fibre B=1 0.81M、B=8 5.7~7.1M,同曲线;transport 仍可见:
+  eventfd B=8 3.8~5.5M vs futex B=8 6.2~6.4M;K=256:B=1 0.74~0.78M→
+  B=8 3.6~4.2M。
+- 结论:每请求 park 次数是 c=1 主成本且可由等待粒度削减;对应 PEL =
+  try-before-park + write 快路径 + 批量提交/等待 + io_uring;B=4~8 为
+  延迟/吞吐折中(p99 批尾换吞吐)。
+- 日志:`bench-logs/bench_echo-20261003-0341*`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差

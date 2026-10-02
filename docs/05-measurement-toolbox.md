@@ -74,7 +74,10 @@ atomic_fetch_add_explicit(&w->stat_wake_writes, 1, memory_order_relaxed);
     (本机 paranoid=3,需 sudo;perf 介入使绝对延迟 ~2×,只做相对比较);
   - **VMA 计数**:每 mmap+mprotect 产生 2 个 VMA,`vm.max_map_count` 默认
     65530 → fibre 并发上限 ~32.7K;测大规模驻留前需临时放宽并恢复;
-  - 读 RSS 用 `/proc/self/status` 的 VmPeak/VmRSS(mode=create/ring 已内建)。
+  - 读 RSS 用 `/proc/self/status` 的 VmPeak/VmRSS(mode=create/ring 已内建);
+  - park 次数曲线:`bench_echo --ack=park --batch B`(driver 在途窗口 B,
+    每 B 个完成 park 一次;B=1 旧口径);看 `driver-parks/req`、`futex/req`
+    与 rps/p99 的折中(B 增大 p99 批尾上升)。
 
 ## 3. L1 perf(热点与硬件计数)
 

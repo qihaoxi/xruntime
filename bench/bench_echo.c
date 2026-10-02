@@ -20,9 +20,12 @@
  *               (忠实 PEL 阻塞 echo 的 2 对 park/wake)。
  *   --l0=fibre:conn/driver 用 stackful 阻塞 body(机制/flags/测量点不变),
  *              与 stackless 对照"每请求 park 次数"成本。
+ *   --batch B:driver 在途窗口 B(每 B 个 ack 才 park 一次;B=1 与旧口径等价;
+ *              B→大 逼近 spin 上界)。ack 计数按完成序近似归因到最早未记账
+ *              请求的 t_post。
  * 指标:rps、req→ack p50/p99、transport/req、runs/req、合并率。
  *   bench_echo [--conns K] [--drivers M] [--ops N] [--wkcpu C] [--drcpu C]
- *              [--flags N] [--ack=spin|park] [--l0=stackless|fibre]
+ *              [--flags N] [--ack=spin|park] [--l0=stackless|fibre] [--batch B]
  */
 
 #define EB_QUEUE_CAP 256
@@ -54,7 +57,11 @@ typedef struct
 	_Atomic uint64_t ack; /* spin 口径 */
 	uint64_t t0;
 	int done;
-	int inflight; /* stackless 首发守卫 */
+	int batch;     /* park 口径:在途窗口(B=1 旧口径) */
+	uint64_t posted;
+	_Atomic uint64_t acks; /* park 口径:到达的 ack 数 */
+	uint64_t *t_post;      /* [ops] 每请求投递时刻 */
+	uint64_t parks;        /* driver 实际挂起次数(诊断) */
 } eb_driver_t;
 
 struct eb
@@ -118,6 +125,8 @@ static int conn_step(xr_task_t *t)
 
 				if (b->park_mode != 0)
 				{
+					atomic_fetch_add_explicit(&d->acks, 1,
+							memory_order_release);
 					xr_parker_unpark(&d->task.parker, 0);
 				}
 				else
@@ -179,36 +188,42 @@ static void *drv_thread(void *arg)
 	return NULL;
 }
 
-/* ---------- driver:park 口径(task,driver worker 上) ----------
- * stackless 续体每次唤醒都从函数头重入:首发必须用 inflight 守卫,且
- * deliver 的 NOTIFIED 只能由循环顶的 park 消费。旧两版分别犯"幻影 op"
- * (park 在尾、吞掉本次 deliver)与"重发重置 t0"(首发块每次重入都执行)
- * 的错误,fibre 对照轮暴露;现形态与 conn_step/drv_thread 语义一致。 */
+/* ---------- driver:park 口径(task,driver worker 上;在途窗口 batch) ----------
+ * stackless 续体每次唤醒从函数头重入;窗口补满 + 记账到达的 ack + park。
+ * 每请求 park 次数 ≈ 1/batch(窗口内 ack 未到齐时会被 parker 合并唤醒)。 */
 static int drv_step(xr_task_t *t)
 {
 	eb_driver_t *d = t->user;
 	eb_t *b = d->b;
 
-	if (d->inflight == 0)
-	{
-		eb_conn_t *c = &b->conns[d->id % b->k];
-
-		d->t0 = xr_tsc();
-		conn_post(c, d->id);
-		xr_parker_unpark(&c->task.parker, 0);
-		d->inflight = 1;
-	}
 	for (;;)
 	{
-		xr_park_result_t r = xr_parker_park(&t->parker);
-
-		if (r == XR_PARK_SUSPENDED)
+		/* 记账已到达的 ack(按完成序归因到最早未记账请求) */
+		for (;;)
 		{
-			return XR_TASK_PARKED;
+			uint64_t a = atomic_load_explicit(&d->acks,
+							  memory_order_acquire);
+
+			if (a <= d->done || d->done >= (uint64_t)d->ops)
+			{
+				break;
+			}
+			d->lat[d->done] = xr_tsc() - d->t_post[d->done];
+			d->done++;
 		}
-		/* CONSUMED:在途请求的 ack 到达 */
-		d->lat[d->done] = xr_tsc() - d->t0;
-		d->done++;
+		/* 补满在途窗口(必须在记账之后,否则窗口不释放) */
+		while (d->posted < (uint64_t)d->ops &&
+		       d->posted - d->done < (uint64_t)d->batch)
+		{
+			eb_conn_t *c =
+				&b->conns[(d->id + d->posted) % b->k];
+			uint64_t seq = d->posted;
+
+			d->t_post[seq] = xr_tsc();
+			conn_post(c, d->id);
+			xr_parker_unpark(&c->task.parker, 0);
+			d->posted++;
+		}
 		if (d->done >= d->ops)
 		{
 			atomic_fetch_add_explicit(&b->drivers_done, 1,
@@ -216,13 +231,13 @@ static int drv_step(xr_task_t *t)
 			return XR_TASK_DONE;
 		}
 		{
-			eb_conn_t *c =
-				&b->conns[(d->id + d->done) % b->k];
+			xr_park_result_t r = xr_parker_park(&t->parker);
 
-			d->t0 = xr_tsc();
-			conn_post(c, d->id);
-			xr_parker_unpark(&c->task.parker, 0);
-			d->inflight = 1;
+			if (r == XR_PARK_SUSPENDED)
+			{
+				d->parks++;
+				return XR_TASK_PARKED;
+			}
 		}
 	}
 }
@@ -262,6 +277,8 @@ static void conn_fibre_entry(xr_task_t *t)
 
 				if (b->park_mode != 0)
 				{
+					atomic_fetch_add_explicit(&d->acks, 1,
+							memory_order_release);
 					xr_parker_unpark(&d->task.parker, 0);
 				}
 				else
@@ -286,15 +303,38 @@ static void drv_fibre_entry(xr_task_t *t)
 	eb_driver_t *d = t->user;
 	eb_t *b = d->b;
 
-	for (int i = 0; i < d->ops; i++)
+	for (;;)
 	{
-		eb_conn_t *c = &b->conns[(d->id + i) % b->k];
-		uint64_t t0 = xr_tsc();
+		for (;;)
+		{
+			uint64_t a = atomic_load_explicit(&d->acks,
+							  memory_order_acquire);
 
-		conn_post(c, d->id);
-		xr_parker_unpark(&c->task.parker, 0);
+			if (a <= d->done || d->done >= (uint64_t)d->ops)
+			{
+				break;
+			}
+			d->lat[d->done] = xr_tsc() - d->t_post[d->done];
+			d->done++;
+		}
+		while (d->posted < (uint64_t)d->ops &&
+		       d->posted - d->done < (uint64_t)d->batch)
+		{
+			eb_conn_t *c =
+				&b->conns[(d->id + d->posted) % b->k];
+			uint64_t seq = d->posted;
+
+			d->t_post[seq] = xr_tsc();
+			conn_post(c, d->id);
+			xr_parker_unpark(&c->task.parker, 0);
+			d->posted++;
+		}
+		if (d->done >= d->ops)
+		{
+			break;
+		}
+		d->parks++; /* 近似:wait 调用数(可能被 STORED 直接消费) */
 		xr_task_wait(t);
-		d->lat[i] = xr_tsc() - t0;
 	}
 	atomic_fetch_add_explicit(&b->drivers_done, 1, memory_order_release);
 }
@@ -331,6 +371,7 @@ int main(int argc, char **argv)
 	unsigned flags = 0;
 	int park_mode = 0;
 	int l0_fibre = 0;
+	int batch = 1;
 	eb_t b;
 	uint64_t t_start;
 	uint64_t t_end;
@@ -382,6 +423,14 @@ int main(int argc, char **argv)
 		{
 			l0_fibre = 0;
 		}
+		else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc)
+		{
+			batch = atoi(argv[++i]);
+			if (batch < 1)
+			{
+				batch = 1;
+			}
+		}
 	}
 
 	memset(&b, 0, sizeof(b));
@@ -402,7 +451,8 @@ int main(int argc, char **argv)
 	for (int i = 0; i < m; i++)
 	{
 		b.drivers[i].lat = calloc((size_t)ops, sizeof(uint64_t));
-		if (b.drivers[i].lat == NULL)
+		b.drivers[i].t_post = calloc((size_t)ops, sizeof(uint64_t));
+		if (b.drivers[i].lat == NULL || b.drivers[i].t_post == NULL)
 		{
 			fprintf(stderr, "oom\n");
 			return 1;
@@ -453,6 +503,7 @@ int main(int argc, char **argv)
 		b.drivers[i].b = &b;
 		b.drivers[i].id = i;
 		b.drivers[i].ops = ops;
+		b.drivers[i].batch = batch;
 		b.drivers[i].cpu =
 			drcpu >= 0 ? (drcpu + i) % xr_cpu_count() : -1;
 		if (park_mode != 0)
@@ -571,10 +622,10 @@ int main(int argc, char **argv)
 		lat_avg = all_n != 0 ? xr_tsc_to_ns(lat_sum / all_n) : 0;
 
 		printf("bench_echo: conns=%d drivers=%d ops/thread=%d total=%" PRIu64
-		       " wkcpu=%d ack=%s l0=%s flags=%u\n",
+		       " wkcpu=%d ack=%s l0=%s batch=%d flags=%u\n",
 		       k, m, ops, total, wkcpu,
 		       park_mode != 0 ? "park" : "spin",
-		       l0_fibre != 0 ? "fibre" : "stackless", flags);
+		       l0_fibre != 0 ? "fibre" : "stackless", batch, flags);
 		printf("  rps=%.0f elapsed=%.1fms\n", (double)total / sec,
 		       (double)(t_end - t_start) / 1e6);
 		printf("  req->ack p50=%" PRIu64 "ns p99=%" PRIu64
@@ -590,6 +641,17 @@ int main(int argc, char **argv)
 		       (double)delivers / (double)total,
 		       delivers != 0 ? (double)runs / (double)delivers : 0.0,
 		       sc.runs, sd.runs);
+		if (park_mode != 0)
+		{
+			uint64_t parks = 0;
+
+			for (int i = 0; i < m; i++)
+			{
+				parks += b.drivers[i].parks;
+			}
+			printf("  driver-parks=%.4f/req (waits; fibre 为调用数近似)\n",
+			       (double)parks / (double)total);
+		}
 	}
 
 	for (int i = 0; i < k; i++)
@@ -599,6 +661,7 @@ int main(int argc, char **argv)
 	for (int i = 0; i < m; i++)
 	{
 		free(b.drivers[i].lat);
+		free(b.drivers[i].t_post);
 	}
 	free(all);
 	free(b.conns);
