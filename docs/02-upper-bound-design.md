@@ -309,6 +309,46 @@ if (!op_supported(IORING_OP_MSG_RING)) goto fallback_futex;
 **本仓范围**:沙盒按 01-plan 只做 Linux(不做跨平台兼容层);本轮只落
 `probe` 的 Linux 阶梯与记录(V9),Windows/macOS 后端属"另立运行时"立项范畴。
 
+### V9.2 睡眠点复用 vs 角色分层(notify / transport / resume 三分)
+
+**物理约束**:一个线程一次只能阻塞在一个睡眠点;futex 叫不醒 `epoll_wait`。
+
+**三分模型(概念上本来是三件事)**:
+
+| 层 | 语义 | 拥有者 | 可否合并 |
+|---|---|---|---|
+| **notify(任务就绪)** | parker 状态 + payload + 入队 | 唤醒方 | 可合并(多次 notify→一次唤醒) |
+| **transport(线程唤醒)** | 仅目标线程确在睡时,按其睡眠原语打断 | 唤醒方 | 可合并;醒着=零成本 |
+| **resume(执行恢复)** | owner drain 后真正跑(stackless=调用/stackful=栈切换) | 消费者 | 批量化、LIFO/公平策略 |
+
+**PEL 现状**:`pel_scheduler_wakeup` 恒 `uv_async_send`,把 notify+schedule+
+transport 融合在唤醒方一次调用(transport 恒发,靠 libuv pending 合并);
+resume 已延迟到 check/drain,但 `fibre_registry_resume_handle` 的命名把
+"schedule+notify"叫成了 resume。**收益证据**:B2 `eventfd/req` 0.995→0.124→
+0.019(N 次 notify 合并为 1 次 transport);B1 同线程 50ns vs 跨线程 3µs
+(醒着不 transport);V5 RTT -88%(transport 只在确已睡时发生)。
+
+**判据(不是"有无 IO",而是"目标线程睡在哪")**:
+- 目标只做纯任务交接 → 睡 futex → 任务唤醒走 futex;
+- 目标要等 fd → 睡 epoll → 打断必须走 eventfd / io_uring;
+- 两类混在同一线程时只能 hybrid(按当前等待对象路由),并处理"决定睡
+  futex vs epoll"的竞态窗口。
+
+**tokio 式角色分层(上限路径目标形态)**:
+
+```
+worker 线程:无活 → 睡 futex(V5 单字);任务唤醒 = 入队 + futex unpark
+活跃线程  :持 I/O driver → 睡 epoll;IO 就绪 → 转成任务唤醒(入队+unpark)
+eventfd   :仅 poll 集变化/超时/关闭等控制面(低频)
+```
+
+- 高频"任务就绪"与低频"内核等待集变化"分道,歧义消失;stackless 下 IO 完成
+  只需 re-poll,不需要跨线程 resume(每 IO 一跳的代价不存在);
+- io_uring 可用时进一步统一:loop 睡 `io_uring_enter`,CQE + MSG_RING 同源
+  (V9.1),eventfd 也可省;
+- 收敛点不变:notify=`task_deliver` · transport=`worker_wake`(唯一) ·
+  resume=`worker_run_task`;三者除明确的安全点直投(V1/V7)外不得互相内联。
+
 ## 4. 分段预算与目标数字
 
 V0 实测(01-plan §4 S2,3 轮 median):B1 跨线程 RTT=3.0µs(producer_side

@@ -71,8 +71,13 @@
 - **futex 唤醒原语**:价值最高、改动面最小(唤醒链已有唯一漏斗:
   PEL `pel_scheduler_wakeup` + loop park)。形态建议:worker/loop 睡眠用
   futex 单字协议(0=声明睡眠/1=awake,0→1 才 `futex_wake`),真实 IO 仍走
-  epoll;两形态在同一漏斗内按"是否已睡/是否有 fd 事件"选择。风险:libuv
-  集成需 hybrid(不能只 futex 不 epoll),须按 PEL 核心目录门禁走设计+评审;
+  epoll;两形态按**目标线程当前睡眠原语**路由(睡 futex→futex_wake;
+  睡 epoll→eventfd;与"本次唤醒有无 IO"无关)。风险:libuv 集成需 hybrid
+  (不能只 futex 不 epoll),须按 PEL 核心目录门禁走设计+评审。
+  > 注:此 **hybrid 是"同线程 loop + stackful"的妥协**——一个线程必须同时
+  > 服务两类唤醒。上限路径按 **tokio 式角色分层**(worker 睡 futex、
+  > 选举 driver 睡 epoll、eventfd 仅控制面);概念拆解见
+  > `02-upper-bound-design.md` §V9.2(notify / transport / resume 三分)。
 - **MPSC 队列**:只对同线程 hop 有意义,收益 -45% 但 PEL 瓶颈不在同线程
   队列,优先级低。
 
