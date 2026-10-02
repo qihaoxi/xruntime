@@ -24,6 +24,7 @@ add_library(xr STATIC
   src/xr_log.c
   src/xr_env.c
   src/xr_parker.c
+  src/xr_worker.c
 )
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(xr PRIVATE ${XR_WARN_FLAGS})

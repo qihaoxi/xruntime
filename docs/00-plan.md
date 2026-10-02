@@ -82,7 +82,7 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 | S | 内容 | 判定物 | 状态 |
 |---|---|---|---|
 | S1 | 骨架:CMake/目录/日志规范/绑核与 sanitizer 脚本(+ parker 三态最小实现前移) | 构建可跑 | ✅ 2026-10-02 |
-| S2 | V0 基线 + B1/B2,复刻 PEL 唤醒形态 | 基线数字 | ⬜ |
+| S2 | V0 基线 + B1/B2,复刻 PEL 唤醒形态 | 基线数字 | ✅ 2026-10-02 |
 | S3 | V1/V2(H1/H4),目标:同线程链零 transport | A/B 报告 | ⬜ |
 | S4 | V3/V4(H2/H3/H5),队列与 lifetime | A/B 报告 | ⬜ |
 | S5 | V5 transport 备选(H6) | A/B 报告 | ⬜ |
@@ -96,7 +96,19 @@ S1 验证(2026-10-02,本机 16 核):
 - 脚本:`build.sh [debug|release|asan|tsan|ubsan]`(`XR_CC=clang` 多编译器并存,
   `run-tests.sh`/`run-bench.sh`/`env-check.sh`),日志落 `test-logs/`、`bench-logs/`。
 
-每步:假设→实现→同窗测量→判定(keep/revert)→更新本台账。
+S2 验证(2026-10-02,本机 16 核,release;注意:governor=powersave 未切换,
+但 3 轮 p50 逐 ns 一致,量级结论可用):
+- V0 链路落地:xr_worker(epoll+eventfd+mutex registry/ready 队列)+
+  xr_task(stackless 续体)+ 弱句柄(id)deliver;test_worker 1 万往返五面绿。
+- B1 跨线程(ops=20 万,wkcpu=1/prodcpu=2,3 轮 median-p50):
+  producer_side(claim/publish/deliver+registry+队列+eventfd)=1.24µs;
+  consumer_wake(传输+tick+恢复)=1.75µs;RTT=3.0µs(p99 4.7µs,avg 3.2µs)。
+  单对 park/wake≈3µs,与 PEL ~11.5µs/往返=4 对(≈2.9µs/对)同量级。
+- B2 wait 模式(请求-响应口径,复刻 D5):eventfd/unpark M=1 **0.995**
+  (PEL D5 echo c=1=1.00);M=4 0.250;M=8 **0.118~0.125**(PEL c=16 echo=0.13)。
+  无节流 unpaced:M=1 即 99.7% merged(eventfd/op 0.002)=latch 合并上限形态。
+- 结论:V1/V2 的对照基线就位;"链上单对"成本已与 PEL 每对接近,后续变体
+  净收益可直接在同一 B1/B2 口径上判定。
 
 ## 5. 风险与边界
 

@@ -8,14 +8,12 @@ echo "== cpu =="
 nproc
 
 echo "== governor =="
-found=0
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-	if [ -f "$g" ]; then
-		cat "$g"
-		found=1
-	fi
-done | sort | uniq -c || true
-[ "$found" -eq 1 ] || echo "(no cpufreq sysfs)"
+govs="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null)"
+if [ -n "$govs" ]; then
+	printf '%s\n' "$govs" | sort | uniq -c
+else
+	echo "(no cpufreq sysfs)"
+fi
 
 echo "== loadavg =="
 cat /proc/loadavg

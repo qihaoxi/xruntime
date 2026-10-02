@@ -15,7 +15,7 @@ A/B,为"是否值得另立高上限运行时 / 能否回灌 PEL"提供同窗测�
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | S1 | 骨架 + parker 三态最小实现 | ✅ 2026-10-02 |
-| S2 | V0 基线(worker/registry/mutex 队列)+ B1/B2 | ⬜ |
+| S2 | V0 基线(worker/registry/mutex 队列)+ B1/B2 | ✅ 2026-10-02 |
 | S3 | V1 同线程直投 / V2 门控 wake | ⬜ |
 | S4 | V3 lock-free 队列 / V4 waker lifetime | ⬜ |
 | S5 | V5 transport 备选(futex/io_uring/批量) | ⬜ |
@@ -40,10 +40,12 @@ state: IDLE --park CAS--> PARKED --unpark CAS--> NOTIFIED --park CAS--> IDLE
 ## 目录
 
 ```
-include/xr/   xr_parker.h(三态协议) · xr_time.h(TSC/单调钟) · xr_log.h · xr_env.h(绑核)
-src/          上述实现;xr_parker.c 为机制核心
-tests/        test_parker(状态机/合并/跨线程) · test_smoke(时间/日志/绑核)
-bench/        bench_env(测量环境体检 + 时间源自身成本)
+include/xr/   xr_parker.h(三态协议) · xr_task.h(stackless 续体/弱句柄) ·
+              xr_worker.h(V0 worker) · xr_time.h · xr_log.h · xr_env.h(绑核)
+src/          上述实现;xr_parker.c=机制核心,xr_worker.c=V0 唤醒链
+tests/        test_parker · test_worker(V0 万次往返) · test_smoke
+bench/        bench_env(环境体检) · bench_roundtrip(B1 延迟分解) ·
+              bench_fanin(B2 唤醒税,--wait=请求-响应口径)
 scripts/      build.sh · run-tests.sh · run-bench.sh · env-check.sh
 docs/         00-plan.md(计划/台账/判据)
 test-logs/    构建与测试日志(gitignore)  bench-logs/  基准日志(gitignore)
@@ -68,6 +70,12 @@ scripts/run-tests.sh debug        # ctest,失败样例见日志
 ```bash
 scripts/build.sh release
 scripts/run-bench.sh release bench_env --iters 200000 [--cpu N]
+
+# B1 唤醒延迟分解(跨线程,串行)
+scripts/run-bench.sh release bench_roundtrip --ops 200000 --wkcpu 1 --prodcpu 2
+
+# B2 每请求唤醒税(fan-in;--wait=请求-响应口径,复刻 PEL D5)
+scripts/run-bench.sh release bench_fanin --producers 8 --ops 200000 --wkcpu 1 --prodcpu 2 --wait
 ```
 
 测量纪律(沿用 PEL):先跑 `scripts/env-check.sh`(governor=performance、无遗留
