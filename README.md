@@ -47,7 +47,7 @@ tests/        test_parker · test_worker(V0 万次往返) · test_smoke
 bench/        bench_env(环境体检) · bench_roundtrip(B1 延迟分解) ·
               bench_fanin(B2 唤醒税,--wait=请求-响应口径)
 scripts/      build.sh · run-tests.sh · run-bench.sh · env-check.sh
-docs/         00-plan.md(计划/台账/判据)
+docs/         00-plan.md(计划/台账/判据) · 01-handoff-s4-s6.md(S4–S6 交接)
 test-logs/    构建与测试日志(gitignore)  bench-logs/  基准日志(gitignore)
 ```
 

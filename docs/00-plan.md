@@ -79,6 +79,8 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 
 ## 4. 步骤台账
 
+> S4–S6 的逐变体接口/实现步骤/验收/坑,见 `docs/01-handoff-s4-s6.md`(交接文档)。
+
 | S | 内容 | 判定物 | 状态 |
 |---|---|---|---|
 | S1 | 骨架:CMake/目录/日志规范/绑核与 sanitizer 脚本(+ parker 三态最小实现前移) | 构建可跑 | ✅ 2026-10-02 |
