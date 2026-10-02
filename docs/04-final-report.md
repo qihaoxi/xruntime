@@ -94,6 +94,39 @@
   (01 §0.5:同一组机制变体在 stackless 与 stackman+vstack 下复跑),在此之前
   不建议另立运行时。
 
+### 3.5 回灌收益预估与验证计划
+
+> 性质:**工程预估(待 PEL 同窗 A/B 确认),非承诺**。沙盒量的是"唤醒对"本身;
+> PEL 每对还叠加 registry/锁/队列/栈切换/loop tick,且高并发下 transport 早已
+> 被 libuv pending 合并——**不能按沙盒 -88% 直接外推**。
+
+| 场景 | PEL 现状(doc151 §4.3/终态矩阵) | hybrid 回灌预估 | 依据 |
+|---|---|---|---|
+| echo c=1 | 57.5–69.5K rps,p50 13.0µs(eventfd/req 1.0) | **+10~30%,p50 ~10–12µs** | 每请求 1 次真 transport;沙盒 eventfd+epoll 3.0µs→futex 0.39µs |
+| http c=1 | 47.8K,p50 18.5µs(eventfd/req **2.0**) | **+15~35%,p50 ~14–16µs** | 每请求 2 次,省得更多 |
+| echo/http c=16 | 110–124K(0.38/0.13 次写/req) | **+3~10%(可能在噪声内)** | transport 大量合并;loop 多在 epoll 等服务 IO,futex 只在"无 fd 等待窗口"生效 |
+| c=256 | ~108K(0.008–0.025/req) | **基本持平** | transport 已摊薄;瓶颈在调度/事件面不在唤醒 |
+| UDP echo | 4 对/往返 11.5µs | **最多 +20~40%**,取决于其中多少对是"跨线程且真睡着" | 4 对里同线程 IO 回调占多数,hybrid 抓不到 |
+
+**为什么是区间**:PEL 是同线程 loop + stackful,futex 只能覆盖"loop 无 fd 可等、
+睡在 futex"的窗口;loop 睡在 epoll(IO 服务态)时跨线程唤醒仍须 eventfd。
+沙盒把"任务就绪"与"线程睡眠"拆开了,所以 -88% 不可搬。
+
+**上限与边界**:
+- 回灌(hybrid)现实上限:低并发延迟 -10~35%、高并发 +3~10%;
+  **不可能把对 rust 的 0.37–0.69× 拉到 1.0×**——那是 stackful 模型税
+  (每请求两次完整阻塞原语 + 栈切换,D9 定性);
+- tokio 式角色分层在 PEL 的 stackful 同线程回调模型下会给每个 IO 加一次
+  跨线程 handoff(正是要消灭的跳数)→ 不划算;**吃满收益需另立运行时**
+  (stackless + futex + LIFO + 可选 io_uring;地板见上);
+- 高并发不动的部分:V4a 证明 registry 非税、V3 只对同线程 hop 有效(PEL
+  不可能把工作搬回同线程,D8 已否决)→ 回灌只盯 transport 一处。
+
+**验证计划(立项判据)**:同窗单变量 A/B——PEL 终态(D4+D7+D6)vs 只换
+transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
+`strace -c`、perf;≥5% 或分布明确前移才保留。走 PEL 核心目录设计评审
+(doc155 §7.7),沙盒结论不构成修改依据。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
