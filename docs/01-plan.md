@@ -267,6 +267,8 @@ S9 验证(park 次数削减曲线,U9;2026-10-03,release):
 
 ## 6. 对照资料
 
+- 本仓评估:`docs/06-pel-modification-eval.md`(PEL 修改全面评估:
+  M1 futex 回灌 / M2 park 次数削减 / M3 io_uring;步骤/原因/数据/判据)。
 - PEL:`docs/148` §0.1–0.3/§3.1/ledger · `docs/151` §4.3 · `docs/152` §7 ·
   `docs/156` §4–5 · `docs/160/161` · `docs/00-unified-lifecycle-design.md`
   §0/§5.2 · `src/scheduler/pel_parker.h` · `src/eventloop/uv_channel.c`。

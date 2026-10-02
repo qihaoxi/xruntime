@@ -131,6 +131,9 @@
 transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 `strace -c`、perf;≥5% 或分布明确前移才保留。走 PEL 核心目录设计评审
 (doc155 §7.7),沙盒结论不构成修改依据。
+**完整评估材料**(M1 futex 回灌 / M2 park 次数削减 / M3 io_uring 的步骤、
+原因、数据、组合预期、验证清单、开放问题)见
+`docs/06-pel-modification-eval.md`。
 
 ### 3.6 L0 栈切换对照轮结果(U7,2026-10-03)
 
