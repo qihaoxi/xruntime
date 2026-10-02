@@ -101,6 +101,18 @@ L0 栈切换       stackless(函数调用) │ stackman+vstack │ 自研最小 
   PEL 对 rust 的 0.37–0.69× 不能由切换成本解释,更可能是阻塞式 API 的
   **每请求 park 次数**与事件面形态;若目标形态含高频任务创建(per-request),
   创建/销毁 51× 与未测的 TLB 需先补证再决定另立运行时。
+- **驻留/TLB/VMA 补测(S8,N 节点 token-ring,2M 跳)**:
+  - rtt p50(µs):stackless 3.33~3.38(N=16~100K 平);fibre 3.37(N=16)→
+    3.52(N=100K),consumer p50 1.96→2.18µs(+11%);
+  - perf TLB:fibre N=16 miss 2.9%(0.92M/32.1M loads)→N=100K 13.3%
+    (29.5M/221M);stackless N=100K 12.5%(24.3M/194M)——差 ~2.6/hop,
+    说明 TLB 压力主要是**工作集效应**,非栈页专有;rtt 差 ≤1%(perf 口径);
+  - **VMA 硬墙**:vm.max_map_count 默认 65530,每 fibre 2 VMA →
+    N≈32.7K 并发即 mmap 失败(放宽到 1M 后才到 100K);stackless 无此限;
+  - RSS:N=100K 驻留 fibre 422MB(VmPeak 2.1GB)vs stackless 123MB。
+  - **判据更新**:高频创建/销毁 51× 与 VMA/RSS 一起构成 stackful 的规模
+    约束;TLB 不再是首要疑虑。二者由 vstack slot pool/复用摊薄,但需在
+    PEL 同窗实测,沙盒数为下限。
 
 ## 1. 上限的定义:分段成本模型与物理下限
 

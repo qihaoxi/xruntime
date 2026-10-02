@@ -67,6 +67,14 @@ atomic_fetch_add_explicit(&w->stat_wake_writes, 1, memory_order_relaxed);
 - 限制:自定义栈与 ASan/TSan 不兼容(L0 测试仅 sanitizer=none 注册);
   mmap 栈非 PEL vstack(slot pool/madvise),VA/TLB 压力偏低 → stackful
   成本是**下限**,TLB/100K 驻留需 perf 补测。
+- 驻留/TLB 补测(S8):
+  - `bench_l0 --mode=ring --fibres N --ops <采样跳数>`:N 驻留节点 token-ring,
+    主线程逐跳喂 token,报每跳 t0→t2 分布 + RSS(reside/end);
+  - `sudo perf stat -e dtlb-loads,dtlb-load-misses,cycles,instructions -- ...`
+    (本机 paranoid=3,需 sudo;perf 介入使绝对延迟 ~2×,只做相对比较);
+  - **VMA 计数**:每 mmap+mprotect 产生 2 个 VMA,`vm.max_map_count` 默认
+    65530 → fibre 并发上限 ~32.7K;测大规模驻留前需临时放宽并恢复;
+  - 读 RSS 用 `/proc/self/status` 的 VmPeak/VmRSS(mode=create/ring 已内建)。
 
 ## 3. L1 perf(热点与硬件计数)
 

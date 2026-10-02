@@ -176,9 +176,15 @@ S6 验证(2026-10-03,本机 16 核,release;governor=powersave;B3=bench_echo):
   - M=1:V0 285724 → **V5 futex 2006380 rps(+602%)**,p50 3336→430ns;
   - M=4:V0 2373189 → V5 2559982(+8%),p50 ~1072→1021ns;
   - M=16:V0 1175281 → V5 1388493(+18%,方差大),p50 ~2.1µs 持平。
-- B3 park(driver 为 task,ack=unpark;2 对 park/wake 忠实口径):
-  - K=16,M=4:V0 1251993 → V5 1653450(+32%),p50 ~2284→631ns;
-  - K=256,M=4:V0 1233796 → V5 1766997(+43%),p50 ~1813→650ns。
+- B3 park(driver 为 task,ack=unpark;2 对 park/wake 口径)——
+  **S8 修正**:旧值系 bench_echo `drv_step` 通知双消费 bug(每唤醒推进
+  2 op、t0 被重置),新值(3 轮范围):
+  - K=16,M=4:V0 0.63~0.66M → V5 0.73~0.90M(+15~40%),p50 ~5.5–5.9→
+    ~4.2–5.5µs;
+  - K=256,M=4:V0 0.62~0.68M → V5 0.72~0.84M(+15~35%),p50 ~5.4–6.5→
+    ~4.2–4.8µs;
+  - futex/req≈0.50(诚实 2 对/请求);旧"transport/req M=4 0.04–0.25"
+    中 park 部分同步修正为 ~0.50,spin 部分(0.04–0.25)不变。
 - transport/req 随并发合并下降:M=1 ~1.0 → M=4 ~0.04–0.25 →
   M=16 ~0.04–0.05;低并发是 transport 敏感区。
 - **总报告 `docs/04-final-report.md`**:残差主项=transport(非队列/registry);
@@ -202,14 +208,41 @@ S7 验证(L0 栈切换对照轮,U7;2026-10-03,同机 release,ops=200k):
   L0 测试仅 sanitizer=none 注册。
 - 判据(02 §0.5.3):跨线程 <5%/排序不变 → **保留 stackful 兼容层成立**;
   每次切换模型税 ±30–60ns 可忽略;唯一量级差=创建/销毁 51×;
-  TLB/100K 驻留未测(需 perf,见 05)。
+  TLB/100K 驻留见 S8 补测。
 - 日志:`bench-logs/bench_{roundtrip,l0}-20261003-0240*`。
+
+S8 验证(L0-b:park 口径修正 + 每请求 park 次数 + 驻留/TLB;
+2026-10-03,同机 release):
+- **bench_echo park 口径修正**:`drv_step` 两处续体语义错误——(a) 早期
+  版本 park 在发请求之后,吞掉本次 deliver 并立即记"幻影 op";(b) 修正
+  版首发块在函数头,每次重入重发请求并重置 t0。现形态 = park 在循环顶 +
+  `inflight` 守卫首发,与 conn_step/drv_thread 语义一致;1:1 复验
+  stackless/fibre 一致(p50 4.87 vs 4.44µs,~205K rps)。修正值见 S6。
+- 每请求 park 次数(fibre echo,--ack=park,K=16/256,M=4,3 轮):
+  K=16:stackless V0 0.64M→V5 0.90M(+40%),fibre V0 0.68M→V5 0.84M(+23%);
+  K=256:stackless V0 0.68M→V5 0.72M(+6%),fibre V0 0.61M→V5 0.82M(+33%);
+  futex/req≈0.50(2 对/请求);L0 差 ≤~10% 且在轮间方差内 →
+  **每请求 park 次数是机制属性,不随 L0 改变**。
+- ring 驻留(N 节点 token-ring,fibre 16KB 栈,2M 跳,主线程逐跳驱动):
+  rtt p50(µs):stackless 3.33~3.38(N=16~100K 平);fibre 3.37(N=16)→
+  3.49(N=65536)→3.52(N=100K),consumer p50 1.96→2.18µs(+11%);
+  RSS(reside):fibre N=64K 277MB、N=100K 422MB(VmPeak 2.1GB);
+  stackless N=100K 123MB;VmPeak stackless 135MB。
+- **VMA 硬墙**:默认 vm.max_map_count=65530,每 fibre 2 VMA(guard+RW)
+  → N≈32.7K 即 mmap 失败;放宽 1M 后才跑通 65K/100K;stackless 无此限。
+- perf TLB(2M 跳):fibre N=16 miss 0.92M/32.1M loads(2.9%)→N=100K
+  29.5M/221M(**13.3%**);stackless N=100K 24.3M/194M(12.5%);差
+  ~2.6 misses/hop,rtt 差 ≤1%(perf 口径)→ TLB=工作集效应,非栈页专有;
+  fibre 额外付 +27M loads/RSS/VMA。
+- 日志:`bench-logs/bench_{echo,l0}-20261003-0310*`、
+  `bench-logs/perf-tlb-20261003-031138.log`。
 
 ## 5. 风险与边界
 
-- stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7):每次切换差
-  ±30–60ns、跨线程 V0 +1.4~2.0%、V5 排序不变 → 不否决机制结论;
-  未测项=高频创建/销毁(51×)与 TLB/100K 驻留。
+- stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差
+  ±30–60ns、跨线程 V0 +1.4~2.0%、每请求 park 次数不变、V5 排序不变 →
+  不否决机制结论;stackful 的规模约束 = **创建 51× / VMA 上限(~32.7K
+  并发)/ 100K 驻留 RSS 422MB**,均属"下限估计"(真实 vstack 更高)。
 - 无 libuv 的 loop 与 uv 合并/回调时序不同:V1 同线程直投在 PEL 曾被 D8
   否决(帧寿命契约),**结论迁移回 PEL 必须重新评审**(doc155 §7.7 反绕过
   纪律同样适用);沙盒结果不直接构成对 PEL 核心目录的修改依据。

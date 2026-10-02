@@ -15,7 +15,8 @@
    (**50→20ns,-45%**,V3)。registry 查找(V4a)无收益。
 2. **超 V0 ≥5% 的变体只有两个**:
    - **V5 futex transport**:B1 cross -88%、B2 wait +132%、B3 echo(1 worker,
-     M=1)+602%、park 口径 +32~43%;唯一回退是 B2 unpaced **-11%**(即时唤醒
+     M=1)+602%、park 口径 **+15~40%(S8 修正;旧 +32~43% 含 bench_echo
+     drv_step 通知双消费 bug)**;唯一回退是 B2 unpaced **-11%**(即时唤醒
      降低合并度,延迟换吞吐);
    - **V3 MPSC 队列**:仅同线程 hop -45%,跨线程/B2 噪声内。
 3. **迁移建议**:transport 一项值得以"增量收敛点"回灌 PEL(候选形态:调度器
@@ -37,7 +38,7 @@
 | S5 V5(futex) | cross RTT 3196→390ns(-88%);B2 wait +132% | **transport 是跨线程主项** |
 | S5 V5 unpaced | -11% | 即时唤醒降低合并度(延迟↔吞吐) |
 | S6 B3 spin M=1 | 285K→2.01M rps(+602%),p50 3336→430ns | 低并发(每请求 ~1 transport)收益最大 |
-| S6 B3 park M=4 | 1.23~1.25M→1.65~1.77M rps(+32~43%),p50 -65% | 请求-响应(2 对)口径同向 |
+| S6 B3 park M=4 | 0.62~0.68M→0.72~0.90M rps(+15~40%),p50 ~5.4–6.5→4.2–5.5µs | 请求-响应(2 对/请求,futex/req≈0.50)口径同向;S8 修正 |
 
 **分段归因(本机)**:
 - 同线程一对:2 RMW + 队列 ~20ns(V3 后);
@@ -57,12 +58,12 @@
 | V2 GATE | B1/B2 | 噪声 | 不保留默认 |
 | V3 MPSC | B1 same-thread | RTT p50 -45% | 保留 flag;跨线程无感 |
 | V4a WAKER_DIRECT | B1/B2 | 噪声(略负) | 保留 flag;H3 证伪 |
-| **V5 FUTEX** | B1 cross / B2 wait / B3 | **-88% / +132% / +32~602%** | 保留 flag;低并发必选 |
+| **V5 FUTEX** | B1 cross / B2 wait / B3 | **-88% / +132% / +40~602%** | 保留 flag;低并发必选 |
 | V5 FUTEX | B2 unpaced | **-11%** | 饱和形态回退(延迟换吞吐) |
 
 规模判据:
 - **低并发(M=1)/阻塞请求-响应**:futex 决定性(-88% RTT,+6× rps);
-- **中并发(M=4)**:+8%(spin)/+32~43%(park);
+- **中并发(M=4)**:+8%(spin)/**+15~40%(park,S8 修正口径)**;
 - **高并发饱和(M=16, unpaced)**:futex 中性偏正(spin M=16 中位 +18%,
   噪声大),但 B2 unpaced -11%——**transport 与合并度此消彼长**;
 - 同线程:futex 无差异(不睡眠路径),MPSC 队列 -45%。
@@ -146,8 +147,17 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 - **创建/销毁**:141ns vs 7.20µs/个(**51×**,mmap/mprotect/munmap);
   高频任务创建(per-request)形态下这是唯一量级差,PEL 侧靠 vstack slot
   pool 复用摊薄,需要时再以同窗 A/B 验证;
-- **未测**:TLB/100K 并发驻留(需 perf);本次栈 16KB、无 vstack 的
-  madvise/零页语义,真实 vstack 税只会更高不会更低。
+- **驻留/TLB/VMA(S8 补测,N 驻留节点 token-ring,2M 跳)**:
+  - rtt p50(µs):stackless 3.33~3.38(N=16~100K 平);fibre 3.37(N=16)→
+    **3.52(N=100K)**,consumer p50 1.96→2.18µs(+11%);
+  - perf TLB:fibre N=16 miss 2.9%(0.92M/32.1M loads)→N=100K **13.3%**
+    (29.5M/221M);stackless N=100K 12.5%(24.3M/194M)——差 ~2.6 misses/hop,
+    **TLB 是工作集效应非栈页专有**,rtt 差 ≤1%(perf 口径);
+  - **VMA 硬墙(默认约束)**:vm.max_map_count=65530,每 fibre 2 VMA →
+    N≈32.7K 即 mmap 失败;放宽到 1M 后才跑通 N=65K/100K。stackless 无此限;
+  - RSS:N=100K 驻留 fibre **422MB**(VmPeak 2.1GB)vs stackless 123MB;
+- **未测**:真实 PEL vstack(slot pool/madvise/零页语义)下的 VMA/TLB/RSS,
+  本次为下限;高频 per-request 创建形态未建 bench。
 
 ## 4. 执行摘要与证据位置
 
@@ -157,14 +167,17 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S3 | V1/V2 噪声内(同线程 60ns vs 跨线程 3µs) | 同上 + `01-plan` S3 验证 |
 | S4 | V4a 噪声;V3 同线程 -45%;GATE×MPSC 丢唤醒修复 | `bench-logs/bench_{roundtrip,fanin}-20261003-00[01]*` |
 | S5 | futex -88%/+132%/-11%;单字协议契约 | `bench-logs/bench_{roundtrip,fanin}-20261003-0019~0026*` |
-| S6 | B3 echo:spin M=1 +602%、park +32~43%、transport/req 随 M 合并 | `bench-logs/bench_echo-20261003-*` |
+| S6 | B3 echo:spin M=1 +602%、park +15~40%(S8 修正) | `bench-logs/bench_echo-20261003-*` |
 | S7 | L0 对照:cross V0 +1.4~2.0%、V5 排序不变、创建 51×、切换 5.6ns | `bench-logs/bench_{roundtrip,l0}-20261003-0240*` |
+| S8 | park 口径 bug 修正 + fibre echo 对照 + ring 驻留/TLB/VMA | `bench-logs/bench_{echo,l0}-20261003-0310*`、`perf-tlb-20261003-031138.log` |
 
 ## 5. 风险与边界
 
 1. 沙盒默认 stackless;S7 补了 stackful 对照(自研 asm+简单 mmap 栈),
    不含 PEL vstack 的 madvise/slot pool/TLB 税,stackful 成本是**下限**,
-   结论不能直接等同 PEL;
+   结论不能直接等同 PEL;**S8 补:** 每 fibre 2 VMA,默认 max_map_count=
+   65530 → N≈32.7K 并发即 mmap 失败;100K 驻留 RSS 422MB(vs stackless
+   123MB)。若目标形态含大规模并发驻留,VMA/RSS 先于 TLB 成为硬约束;
 2. governor=powersave 未切换:B3 M=16 方差大,只取中位与方向;跨 session
    数字不可比;
 3. B3 单 worker 绝对 rps 与 PEL 多 channel/rust 公开数**不可比**,只作形态

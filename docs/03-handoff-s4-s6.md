@@ -220,7 +220,8 @@ S1–S3 已完成)。**开工前先读 01-plan §0–§3 与本文件 §1/§2。
 5. S1–S6 全部完成(S3–S6 见 §3/§4/§5 状态,总报告
    `docs/04-final-report.md`);后续候选:transport 回灌 PEL 设计评审、
    L0 栈切换对照轮(01 §0.5)——L0 轮已于 S7 完成(01 S7 / 02 §0.5.5 /
-   04 §3.6)。
+   04 §3.6);**S8 修正了 §5 的 B3 park 口径**(bench_echo `drv_step`
+   通知双消费 bug,S6 park 数字已按修正值改写,见 01 S6/S8)。
 
 并行事项(不属本仓):PEL 侧 macOS 构建修复已推两个 commit
 (`2ce8a740` vmem MADV_NOHUGEPAGE 守卫、`3ae00936` C11 标签后声明),等用户
