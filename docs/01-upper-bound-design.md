@@ -18,6 +18,60 @@
 队列(同线程零 syscall),线程睡眠只在队列空时发生,transport 仅在目标确已睡眠
 时付出。V0 把两层揉在 eventfd 一条链上,是当前每对 park/wake ~3µs 的结构性来源。
 
+## 0.1 首要原则:统一收口(单一漏斗)
+
+本仓约束唯一正文为 `docs/00-unified-constraints.md`:其 §0 规定"同一功能只允许
+一个权威收口点,所有调用路径必经之;AOP/横向切面只在收口挂接",并给出收口点
+清单与守卫。**本文所有变体设计必须遵守该文,不在此重复**。
+
+## 0.5 整体架构与 L0 栈切换选型
+
+### 0.5.1 分层(栈切换与机制层正交)
+
+```
+L4 编程模型     blocking(@await) │ async/状态机           ← 决定 L0 要不要栈
+L3 调度器       LIFO slot + local queue + inject + 批 drain (V1/V3/V7/V8)
+L2 唤醒原语     parker 单字 permit(V6) + 内嵌 waker(V4) + registry/句柄
+L1 传输/事件面   futex(V5) │ eventfd+epoll │ io_uring(V9)
+L0 栈切换       stackless(函数调用) │ stackman+vstack │ 自研最小 asm
+```
+
+**正交原则**:L1–L3 的机制变体(V0–V9)不依赖 L0 的具体形态。同一套 parker/
+队列/transport 应在两种 L0 下各跑一遍,才能把**机制税**与**栈模型税**分解开
+——这是"另立运行时"决策唯一可靠的口径。
+
+### 0.5.2 L0 候选事实(PEL doc22/23 实测基线)
+
+| 维度 | stackless | stackman + vstack |
+|---|---|---|
+| 切换原语 | 函数调用 ~2ns | 6 push + SP 交换 + 6 pop ≈ **15ns**(接近 asm 下限) |
+| 切换总计(含状态管理) | ~42ns | ~100–200ns(余量在 sched lock/状态管理,非 switch) |
+| 创建 / 销毁 | ~200–500ns / ~100–200ns | ~5–10µs / ~2–5µs(vstack mmap/madvise) |
+| 内存 | state ~数百 B | `fibre_stack_t` + vstack 活页 ≈ 8.4KB/fibre |
+| TLB | 近零 | 每 vstack ≥2 条目;100K fibre ≈ 200K 条目 → 抖动 |
+| 编程模型 | 需状态机/编译期改写 | 保留阻塞 `@await` 语义 |
+| 工程面 | 新路径/取消/scope 竞态需重建 | PEL 已有 ASan 集成、死区回收、slot pool 经验 |
+
+- **stackman 不是瓶颈**:15ns 已近下限,自研 asm 收益 <10ns,第一阶段不做;
+- **真正的模型税在 vstack 副作用**:8MB VA/fibre、TLB 抖动、创建销毁 µs 级、
+  VMA 压力、活区不可回收(doc160 零页丢唤醒红线);
+- **stackless 的代价是编程模型**:PEL doc23 判定"产品无 100K+ 需求,不切换";
+  xruntime 上限路径正是用同窗数据回答该判定是否仍然成立。
+
+### 0.5.3 选型路径(两阶段对照 + 判据)
+
+1. **第一阶段(现状)stackless**:机制天花板的最干净测量环境,Tokio 对位;
+2. **第二阶段 stackful 对照轮**:复用现成 `stackman+vstack`(不自研),同一组
+   V1–V9 再跑一遍;新增 L0 维度但机制代码零改动;
+3. **判据**:
+   - 两 L0 差距 <5% 且不改变变体排序 → **保留 stackful**(兼容 PEL 阻塞生态,
+     机制结论可回灌);
+   - 100K+ 并发 / 高频切换下差距显著(TLB + 创建销毁 + 切换吞吐)→ **另立
+     运行时以 stackless 为主、stackful 作兼容层**;
+4. **接口要求**:L0 以 `xr_ctx_switch` 形态抽象(resume/suspend 两个原语 +
+   task 状态),stackless 与 stackman 各做一个实现;禁止机制层直接 include
+   stackman。
+
 ## 1. 上限的定义:分段成本模型与物理下限
 
 ### 1.1 唤醒链分段
@@ -275,6 +329,7 @@ PEL 模型税的定性维持。
 | U4 | V3 SPMC 本地环 + inject | ⬜ |
 | U5 | V5 futex transport + V8 批 drain | ⬜ |
 | U6 | B1/B2/B5 全矩阵 + B6 参照(可选) + 上限判定 | ⬜ |
+| U7 | L0 对照轮:stackman+vstack 实现 `xr_ctx_switch`,机制变体复跑 + 判据 §0.5.3 | ⬜ |
 
 ## 8. 参考
 
@@ -288,3 +343,6 @@ PEL 模型税的定性维持。
   handoff) · `basicLock`(瘦锁 CAS+膨胀) · `LockSupport` permit 契约。
 - Go:`runtime/netpoll.go`(pollDesc rg/wg 二值信号量) · `runtime/proc.go`
   (runq/runnext/findrunnable/wakep)。
+- PEL 基线:doc22(stackman switch ~15ns / 同线程 yield→resume ~100–200ns) ·
+  doc23(有栈/无栈切换、创建销毁、TLB 对比与"暂不切换"决策) ·
+  doc160/161(vstack 零页丢唤醒红线、1 页活区地板、26× RSS 模型税)。
