@@ -1,8 +1,8 @@
-# xruntime 02 — 总报告:S1–S6 与决策建议
+# xruntime 04 — 总报告:S1–S6 与决策建议
 
-日期:2026-10-03 · 状态:终稿 · 上游:`docs/00-plan.md`(计划/判据/台账)、
-`docs/00-unified-constraints.md`(约束)、`docs/01-upper-bound-design.md`(上限路径)、
-`docs/01-handoff-s4-s6.md`(实施交接)
+日期:2026-10-03 · 状态:终稿 · 上游:`docs/01-plan.md`(计划/判据/台账)、
+`docs/00-unified-constraints.md`(约束)、`docs/02-upper-bound-design.md`(上限路径)、
+`docs/03-handoff-s4-s6.md`(实施交接)
 
 > 证据纪律:全部数字为**同机同窗 release、3 轮 median**(governor=powersave
 > 未切换,只信 ≥5% 或分布明确前移);原始日志在 `bench-logs/`、`test-logs/`。
@@ -94,7 +94,7 @@
 | 阶段 | 结论 | 日志 |
 |---|---|---|
 | S1/S2 | 骨架/V0 基线(B1 RTT 3.0µs、B2 M=1 0.995) | `bench-logs/bench_{env,roundtrip,fanin}-20261002-*` |
-| S3 | V1/V2 噪声内(同线程 60ns vs 跨线程 3µs) | 同上 + `00-plan` S3 验证 |
+| S3 | V1/V2 噪声内(同线程 60ns vs 跨线程 3µs) | 同上 + `01-plan` S3 验证 |
 | S4 | V4a 噪声;V3 同线程 -45%;GATE×MPSC 丢唤醒修复 | `bench-logs/bench_{roundtrip,fanin}-20261003-00[01]*` |
 | S5 | futex -88%/+132%/-11%;单字协议契约 | `bench-logs/bench_{roundtrip,fanin}-20261003-0019~0026*` |
 | S6 | B3 echo:spin M=1 +602%、park +32~43%、transport/req 随 M 合并 | `bench-logs/bench_echo-20261003-*` |

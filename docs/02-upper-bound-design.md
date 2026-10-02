@@ -1,15 +1,15 @@
-# xruntime 01 — 上限路径设计:parker / io wakeup 的极限形态
+# xruntime 02 — 上限路径设计:parker / io wakeup 的极限形态
 
-日期:2026-10-02 · 状态:设计(待评审) · 定位:**上限路径**,与 00-plan 的 PEL 对照沙盒并行
+日期:2026-10-02 · 状态:设计(待评审) · 定位:**上限路径**,与 01-plan 的 PEL 对照沙盒并行
 
 ## 0. 定位与关系
 
-- `00-plan.md`:PEL 对照沙盒——V0 复刻 PEL 形态,单变量 A/B,结论面向"能否回灌 PEL";
+- `01-plan.md`:PEL 对照沙盒——V0 复刻 PEL 形态,单变量 A/B,结论面向"能否回灌 PEL";
 - 本文:**上限路径**——不背 PEL 契约(弱句柄 miss-drop / 发布权 claim / 三态
   payload),以 Tokio / Project Loom / HotSpot / Go 为参照系,定义唤醒链每段的
   **物理下限**,给出 V0→极限的完整形态、分段预算与验收判据,回答:
   **"唤醒链还能压到多低?另立高上限运行时是否成立?"**
-- 变体编号与 00-plan 的 V0–V5 不冲突:V0–V5 语义不变,本文为每个变体标注
+- 变体编号与 01-plan 的 V0–V5 不冲突:V0–V5 语义不变,本文为每个变体标注
   **上限形态**并追加 V6–V9(超出原矩阵的极限手段);
 - 结论边界:上限路径的结论**只用于"另立运行时"决策**,不直接回灌 PEL
   (PEL doc155 §7.7 反绕过纪律同样适用,回灌须按 PEL 00 §0.3.2 重新评审)。
@@ -197,7 +197,7 @@ unpark 侧:  仲裁/发布 → 句柄解析 → 入队 → transport → loop ti
 
 ## 3. 变体到极限形态的映射
 
-> V0–V5 语义按 00-plan 不变;下表是"同一变体做到底"的形态;V6–V9 为追加。
+> V0–V5 语义按 01-plan 不变;下表是"同一变体做到底"的形态;V6–V9 为追加。
 
 ### V1 同线程安全点直投 → 上限形态:tokio LIFO slot
 
@@ -267,9 +267,51 @@ unpark 侧:  仲裁/发布 → 句柄解析 → 入队 → transport → loop ti
 - `io_uring` `IORING_OP_MSG_RING`(跨线程 ring 唤醒)/ futex2 / `eventfd_signal`
   内核侧合并;内核版本探测 + 单独记录,不进默认路径。
 
+### V9.1 transport 后端与启动期能力探测(跨平台对位)
+
+**前提(硬性)**:`IORING_OP_MSG_RING` 的目标是**另一个 io_uring 环**,不是
+epoll loop。loop 若仍睡在 `epoll_wait`,MSG_RING 叫不醒它——要用它当 transport,
+loop 必须整体睡在 `io_uring_enter`(IO 也走 `IORING_OP_POLL_ADD/READ/WRITE`)。
+**MSG_RING 是"全面 io_uring 运行时"的原生 wake,不是 epoll loop 的 drop-in**;
+epoll 仍作 IO 面时,futex hybrid 更简单且已被 S5 实测(RTT 390ns)。
+
+**Linux 启动探测阶梯(能力探测,不是版本号判断)**:
+
+```c
+/* 1) 建环:被 seccomp 拦(EPERM/EACCES)/sysctl 禁(ENOSYS/EPERM)立即降级 */
+if (io_uring_setup(entries, &p) < 0) goto fallback_futex;
+/* 2) 能力位:5.6+ IORING_REGISTER_PROBE(IO_URING_OP_SUPPORTED);
+ *    6.15+ IORING_REGISTER_QUERY 可无环查询(fd=-1),更干净 */
+if (!op_supported(IORING_OP_MSG_RING)) goto fallback_futex;
+/* 3) 功能探测:建第二环,提交一个 MSG_RING,确认目标环收到 CQE(比位图可信) */
+/* 4) 全部通过:transport_backend=io_uring_msg_ring;记录到启动日志/统计 */
+```
+
+现实约束(必须当主路径处理):Docker **默认 seccomp 已封 io_uring**、
+`kernel.io_uring_disabled=2` 可全系统禁、Google 曾整舰队禁用;探测失败→回退
+不是异常。回退阶梯:`MSG_RING → futex hybrid → eventfd+epoll`。
+
+**跨平台对位**:
+
+| 平台 | loop 唤醒(可 poll) | 线程睡眠原语 | 备注 |
+|---|---|---|---|
+| Linux | eventfd+epoll / io_uring MSG_RING | futex | 需 hybrid 或全 io_uring |
+| Windows | **IOCP `PostQueuedCompletionStatus`**(XP+) | 同左 | **单一等待覆盖 IO 完成+自投递**,无需 hybrid;批量 `GetQueuedCompletionStatusEx` |
+| Windows 11 | **IoRing**(Build 22000+):`CreateIoRing`/`QueryIoRingCapabilities`/`IsIoRingOpSupported` | 同左 | io_uring 对位,官方提供能力探测 API |
+| macOS/BSD | `kqueue` `EVFILT_USER`/`NOTE_TRIGGER` | `os_sync_wait_on_address`/`os_sync_wake_by_address_any`(macOS 13+/iOS 16+,公开;更老私有 `__ulock_wait/wake`) | kevent 也叫不醒 os_sync,同需 hybrid |
+| macOS 原生 | mach port(`EVFILT_MACHPORT`) | `mach_msg` | libdispatch/GCD 的跨线程唤醒底座 |
+
+**接口收口(硬性)**:transport 是唯一漏斗(constraints §0)——`probe()` /
+`wake()` / `wait(timeout)` / `capabilities` 四个原语,每后端一个实现;探测结果
+(`transport_backend=...`)必须进启动日志与基准报告,A/B 时后端是显式变量。
+**fallback 必须进 CI 矩阵**(老内核/开 seccomp 容器),否则等于没测。
+
+**本仓范围**:沙盒按 01-plan 只做 Linux(不做跨平台兼容层);本轮只落
+`probe` 的 Linux 阶梯与记录(V9),Windows/macOS 后端属"另立运行时"立项范畴。
+
 ## 4. 分段预算与目标数字
 
-V0 实测(00-plan §4 S2,3 轮 median):B1 跨线程 RTT=3.0µs(producer_side
+V0 实测(01-plan §4 S2,3 轮 median):B1 跨线程 RTT=3.0µs(producer_side
 1.24µs / consumer_wake 1.75µs,p99 4.7µs);B2 `--wait` M=1 eventfd/req=0.995。
 
 | 变体 | 压制的段 | V0 形态 | 上限形态 | 设计目标(待 B1/B4 验证) |

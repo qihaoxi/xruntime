@@ -1,4 +1,4 @@
-# xruntime 00 — parker wakeup 机制沙盒:计划与判据
+# xruntime 01 — parker wakeup 机制沙盒:计划与判据
 
 日期:2026-10-02 · 状态:计划(待评审) · 定位:机制实验仓,非产品运行时
 
@@ -80,7 +80,7 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 
 ## 4. 步骤台账
 
-> S4–S6 的逐变体接口/实现步骤/验收/坑,见 `docs/01-handoff-s4-s6.md`(交接文档)。
+> S4–S6 的逐变体接口/实现步骤/验收/坑,见 `docs/03-handoff-s4-s6.md`(交接文档)。
 
 | S | 内容 | 判定物 | 状态 |
 |---|---|---|---|
@@ -181,7 +181,7 @@ S6 验证(2026-10-03,本机 16 核,release;governor=powersave;B3=bench_echo):
   - K=256,M=4:V0 1233796 → V5 1766997(+43%),p50 ~1813→650ns。
 - transport/req 随并发合并下降:M=1 ~1.0 → M=4 ~0.04–0.25 →
   M=16 ~0.04–0.05;低并发是 transport 敏感区。
-- **总报告 `docs/02-final-report.md`**:残差主项=transport(非队列/registry);
+- **总报告 `docs/04-final-report.md`**:残差主项=transport(非队列/registry);
   超 V0 ≥5% 仅 V3(同线程 -45%)与 V5(futex;-88%/+132%/+32~602%,
   unpaced -11%);迁移建议=transport 增量收敛点回灌 PEL,另立运行时需先做
   L0 栈切换对照轮(01 §0.5)。

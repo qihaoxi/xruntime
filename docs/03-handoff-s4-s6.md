@@ -1,7 +1,7 @@
-# xruntime 01 — S4–S6 实施交接(另一会话继续)
+# xruntime 03 — S4–S6 实施交接(S1–S6 已完成,历史留档)
 
-日期:2026-10-02 · 状态:交接说明 · 上游:`docs/00-plan.md`(计划/判据/台账,
-S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。**
+日期:2026-10-02 · 状态:交接说明 · 上游:`docs/01-plan.md`(计划/判据/台账,
+S1–S3 已完成)。**开工前先读 01-plan §0–§3 与本文件 §1/§2。**
 
 ## 0. 交接基线
 
@@ -35,7 +35,7 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 | `bench/bench_roundtrip.c` | B1:`--same-thread`、`--flags`;段 producer_side/consumer_wake/rtt |
 | `bench/bench_fanin.c` | B2:`--producers/--wait/--flags`;M→1,统计 eventfd/unpark 与返回码分布 |
 | `scripts/*.sh` | build/run-tests/run-bench/env-check |
-| `docs/00-plan.md` | 唯一计划/判据/台账(假设 H1–H6、变体 V0–V5、B1–B3) |
+| `docs/01-plan.md` | 唯一计划/判据/台账(假设 H1–H6、变体 V0–V5、B1–B3) |
 
 关键契约(违反会丢唤醒/竞争,tsan 未必抓到):
 
@@ -80,7 +80,7 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 
 > 状态(2026-10-03):V4a ✅ 未超噪声(不作默认);V3 ✅ 同线程 hop
 > RTT p50 50→20ns(-45%),跨线程/B2 噪声内;H2/H3 证伪。GATE×MPSC 丢唤醒
-> 已修为"MPSC|GATE 时 GATE 自动失效"(constraints §4.2)。结果见 00-plan
+> 已修为"MPSC|GATE 时 GATE 自动失效"(constraints §4.2)。结果见 01-plan
 > S4 验证;下一步 S5。
 
 ### 3.1 目标
@@ -130,13 +130,13 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 → 4. 同窗 A/B:flags=0 与变体各 3 轮 median,同机同 session,
    B1 same/cross + B2 wait/unpaced 至少各一组 → 5. 超噪声(≥5% 或延迟分布
    明确前移)才保留默认;否则保留 flag 但标"未超噪声",台账留档。
-每步更新 `docs/00-plan.md` 台账 S4 与 README 状态表。
+每步更新 `docs/01-plan.md` 台账 S4 与 README 状态表。
 
 ## 4. S5:V5 transport 备选(H6)
 
 > 状态(2026-10-03):V5 futex ✅。B1 cross RTT 3196→390ns(-88%)、B2 wait
 > 1.99→4.62 Mops/s(+132%)、unpaced -11%(延迟换吞吐);H6 证实(transport
-> 是跨线程每对 ~3µs 主项)。单字协议/契约见 00-plan S5 验证与
+> 是跨线程每对 ~3µs 主项)。单字协议/契约见 01-plan S5 验证与
 > constraints §4.2;下一步 S6。
 
 - flag:`XR_WORKER_FUTEX = 1u << 5`(futex 模式替代 epoll 主循环;本沙盒暂无
@@ -162,7 +162,7 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 ## 5. S6:B3 高并发合成 echo + 总报告
 
 > 状态(2026-10-03):S6 ✅。`bench/bench_echo.c`(spin/park 双口径)落地;
-> B3 结果与三问决策见 `docs/02-final-report.md` 与 00-plan S6 验证。
+> B3 结果与三问决策见 `docs/04-final-report.md` 与 01-plan S6 验证。
 > S1–S6 全部完成;后续候选:transport 回灌 PEL 的设计评审、L0 栈切换
 > 对照轮(01 §0.5)。
 
@@ -178,7 +178,7 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 - 形态对照(非严格跨项目对比):PEL doc151 §4.3 与 rust 公开数;重点看
   随 K/M 的拐点与合并率趋势。
 
-### 5.2 总报告(建议 `docs/02-final-report.md`)
+### 5.2 总报告(建议 `docs/04-final-report.md`)
 必须回答:
 1. PEL 残差是否在 wake 机制?(S3 证据:transport 已被合并,跨线程每对 ~3µs
    是传输+唤醒,同线程仅 60ns——直投类优化只在同线程有空间)
@@ -211,14 +211,14 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 
 1. `cd ~/workspace/xruntime && git log --oneline -4` → 期望 `1677514`(交接)
    或其后 S4 提交。
-2. 读 `docs/00-plan.md` §0–§3 + 本文件 §1–§2。
+2. 读 `docs/01-plan.md` §0–§3 + 本文件 §1–§2。
 3. `./scripts/env-check.sh`;跑 debug 基线确认绿:
    `./scripts/build.sh debug && ./scripts/run-tests.sh debug`
    (sanitizer 按需;五面全量按里程碑,见 §0)。
 4. 同 session 重测 flags=0 对照:B1 same-thread、B1 cross-thread、
    B2 wait/unpaced M=1/4/8(命令见 README「构建与基准」)。
 5. S1–S6 全部完成(S3–S6 见 §3/§4/§5 状态,总报告
-   `docs/02-final-report.md`);后续候选:transport 回灌 PEL 设计评审、
+   `docs/04-final-report.md`);后续候选:transport 回灌 PEL 设计评审、
    L0 栈切换对照轮(01 §0.5)。
 
 并行事项(不属本仓):PEL 侧 macOS 构建修复已推两个 commit

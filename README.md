@@ -8,7 +8,11 @@ A/B,为"是否值得另立高上限运行时 / 能否回灌 PEL"提供同窗测�
 - 背景:PEL 性能线收口后,残差被钉为 **stackful 阻塞模型税**与 **事件面/wakeup
   形态差**(echo c≥16 0.37–0.69×rust;UDP 往返 ~11.5µs=4 对 park/wake);
 - 详细计划、假设 H1–H6、变体矩阵 V0–V5、验收判据见
-  [`docs/00-plan.md`](docs/00-plan.md)(唯一正文,随 sub-task 更新台账)。
+  [`docs/01-plan.md`](docs/01-plan.md)(随 sub-task 更新台账);
+- **约束唯一正文**:[`docs/00-unified-constraints.md`](docs/00-unified-constraints.md)
+  (吸收 PEL 00:统一收口/G1–G5/L0–L6/P1–P16);上限路径设计见
+  [`docs/02-upper-bound-design.md`](docs/02-upper-bound-design.md),
+  总报告见 [`docs/04-final-report.md`](docs/04-final-report.md)。
 
 ## 状态
 
@@ -19,7 +23,7 @@ A/B,为"是否值得另立高上限运行时 / 能否回灌 PEL"提供同窗测�
 | S3 | V1 同线程直投 / V2 门控 wake | ✅ 2026-10-02(未超噪声,默认关) |
 | S4 | V3 lock-free 队列 / V4 waker lifetime | ✅ 2026-10-03(V4a 未超噪声;V3 同线程 hop -45%,跨线程/B2 噪声内) |
 | S5 | V5 transport 备选(futex/io_uring/批量) | ✅ 2026-10-03(futex:RTT -88%、wait +132%;unpaced -11%) |
-| S6 | 高并发合成 echo + 总报告/决策建议 | ✅ 2026-10-03(见 `docs/02-final-report.md`) |
+| S6 | 高并发合成 echo + 总报告/决策建议 | ✅ 2026-10-03(见 `docs/04-final-report.md`) |
 
 ## parker 模型
 
@@ -41,13 +45,17 @@ state: IDLE --park CAS--> PARKED --unpark CAS--> NOTIFIED --park CAS--> IDLE
 
 ```
 include/xr/   xr_parker.h(三态协议) · xr_task.h(stackless 续体/弱句柄) ·
-              xr_worker.h(V0 worker) · xr_time.h · xr_log.h · xr_env.h(绑核)
-src/          上述实现;xr_parker.c=机制核心,xr_worker.c=V0 唤醒链
-tests/        test_parker · test_worker(V0 万次往返) · test_smoke
+              xr_worker.h(V0 worker+变体 flags) · xr_mpsc.h(V3 环) ·
+              xr_time.h · xr_log.h · xr_env.h(绑核)
+src/          上述实现;xr_parker.c=机制核心,xr_worker.c=唤醒链(V0–V5)
+tests/        test_parker · test_worker(16 flags 组合) · test_mpsc · test_smoke
 bench/        bench_env(环境体检) · bench_roundtrip(B1 延迟分解) ·
-              bench_fanin(B2 唤醒税,--wait=请求-响应口径)
+              bench_fanin(B2 唤醒税,--wait=请求-响应口径) ·
+              bench_echo(B3 合成 echo,--ack=spin|park)
 scripts/      build.sh · run-tests.sh · run-bench.sh · env-check.sh
-docs/         00-plan.md(计划/台账/判据) · 01-handoff-s4-s6.md(S4–S6 交接)
+docs/         00-unified-constraints.md(约束唯一正文) · 01-plan.md(计划/台账) ·
+              02-upper-bound-design.md(上限路径) · 03-handoff-s4-s6.md(交接) ·
+              04-final-report.md(总报告) · 05-measurement-toolbox.md(测量工具箱)
 test-logs/    构建与测试日志(gitignore)  bench-logs/  基准日志(gitignore)
 ```
 

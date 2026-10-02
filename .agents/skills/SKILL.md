@@ -5,9 +5,9 @@
 | 文档 | 角色 | 何时读 |
 |---|---|---|
 | `docs/00-unified-constraints.md` | **约束唯一正文**(吸收 PEL 00:统一收口/G1–G5/L0–L6/P1–P16) | 改动前必读 §0–§4 |
-| `docs/00-plan.md` | 计划/假设 H1–H6/变体 V0–V5/基准 B1–B3/台账 | 认领任务先读 |
-| `docs/01-upper-bound-design.md` | 上限路径设计(参照 Tokio/Loom/HotSpot,V6–V9、L0 选型) | 做上限变体时 |
-| `docs/01-handoff-s4-s6.md` | S4–S6 实施交接(接口/契约/坑/检查表) | 接手 S4+ 时先读 §1–§2 |
+| `docs/01-plan.md` | 计划/假设 H1–H6/变体 V0–V5/基准 B1–B3/台账 | 认领任务先读 |
+| `docs/02-upper-bound-design.md` | 上限路径设计(参照 Tokio/Loom/HotSpot,V6–V9、L0 选型) | 做上限变体时 |
+| `docs/03-handoff-s4-s6.md` | S4–S6 实施交接(接口/契约/坑/检查表) | 接手 S4+ 时先读 §1–§2 |
 
 ## 工作规则
 
@@ -32,4 +32,5 @@
 |---|---|
 | `xr-sanitizer` | sanitizer 面分级(默认 debug;按需 asan/tsan/ubsan;五面全量按里程碑)与日志/坑 |
 | `xr-bench-ab` | 基准口径、同窗 A/B、定靶取证、变体验收流程 |
+| `xr-perf-tools` | 测量工具选层(TSC/perf/strace/bpftrace/runqlat)与观测坑 |
 | `xr-fix-regression-audit` | 并发/生命周期/调度时机/数据结构替换类改动的回归审计 |

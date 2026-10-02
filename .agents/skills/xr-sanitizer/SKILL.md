@@ -43,7 +43,7 @@ description: >
 - 涉及 parker/worker 并发路径的改动,建议至少按需 `tsan` + `test_worker` 压测
   (丢唤醒 tsan 未必报,见坑);
 - 改动前先对照 `docs/00-unified-constraints.md`(统一收口/生命周期/锁层次)
-  与 `docs/00-plan.md`;变体实现按 `01-handoff-s4-s6.md` §3.5 流程;
+  与 `docs/01-plan.md`;变体实现按 `03-handoff-s4-s6.md` §3.5 流程;
 - 可守卫化的约束做成结构守卫(见 constraints §0/§5),守卫随协议同生共死;
 - **阴性对照**:新增守卫/断言必须注入违规样本验证能咬人,否则是摆设。
 

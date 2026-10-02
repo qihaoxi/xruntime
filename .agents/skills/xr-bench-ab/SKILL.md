@@ -9,7 +9,7 @@ description: >
 
 # xruntime 基准与性能测量纪律(吸收 PEL pel-bench-cross)
 
-来源:`00-plan.md` §3 / `01-handoff-s4-s6.md` §2/§6 / `01-upper-bound-design.md`
+来源:`01-plan.md` §3 / `03-handoff-s4-s6.md` §2/§6 / `02-upper-bound-design.md`
 §4–§5;方法论层在 `00-unified-constraints.md` §4.5,本 skill 是操作层。
 
 ## 1. 跑之前(口径对齐,错一项数字作废)
@@ -37,7 +37,7 @@ scripts/run-bench.sh release bench_fanin --producers 8 --ops 200000 --wkcpu 1 --
 ```
 
 上限路径基准(B4 parker 微基准 / B5 transport 批曲线 / B6 同机 tokio 参照)
-设计见 `01-upper-bound-design.md` §5。
+设计见 `02-upper-bound-design.md` §5。
 
 ## 3. 数字解读
 
@@ -70,7 +70,7 @@ flag → 3. **debug 构建 + 相关测试绿**(按需 asan/tsan;五面全量按�
 2026-10-02 分级)→ 4. 同窗 A/B:flags=0 与变体各 3 轮
 median,B1 same/cross + B2 wait/unpaced 至少各一组 → 5. **超噪声(≥5% 或分布
 明确前移)才保留默认**;否则保留 flag 并标"未超噪声",台账留档 → 6. 更新
-`docs/00-plan.md` 台账 + README 状态表。
+`docs/01-plan.md` 台账 + README 状态表。
 
 ## 6. 已知陷阱速查
 

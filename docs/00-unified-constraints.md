@@ -9,8 +9,8 @@
 > V0–V9、B1–B5)重新落地;**产品域组件(libuv handle/channel/scope/fibre
 > 引用计数/ABI 发布面)显式不适用**(§6 登记)。
 >
-> 关系:`00-plan.md`=计划/判据/台账 · `01-upper-bound-design.md`=上限路径设计 ·
-> `01-handoff-s4-s6.md`=实施交接 · **本文件=约束唯一正文**;冲突时以本文件
+> 关系:`01-plan.md`=计划/判据/台账 · `02-upper-bound-design.md`=上限路径设计 ·
+> `03-handoff-s4-s6.md`=实施交接 · **本文件=约束唯一正文**;冲突时以本文件
 > 条款 + 同窗实测为准。
 
 ## 0. 首要原则:统一收口(单一漏斗,硬性)
@@ -125,7 +125,7 @@
 
 ### 4.1 分层与边界
 
-分层与 L0 栈切换选型见 `01-upper-bound-design.md` §0.5;约束:机制层(L1–L3)
+分层与 L0 栈切换选型见 `02-upper-bound-design.md` §0.5;约束:机制层(L1–L3)
 不得直接 include stackman,栈切换只经 `xr_ctx_switch` 抽象。
 
 ### 4.2 线程安全与锁层次(吸收 PEL §2)
@@ -204,7 +204,7 @@
   > **恢复条件**:出现内存/竞争类缺陷、或进入发布/回灌评审时,恢复"核心目录
   > 改动五面全量"。
 - **观测(G3/P14)**:stats 只原子更新;分段计时(TSC)在收口点打点;
-- **测量纪律(吸收 00-plan §3 + PEL doc146 §0.5)**:先 `env-check.sh`
+- **测量纪律(吸收 01-plan §3 + PEL doc146 §0.5)**:先 `env-check.sh`
   (governor/遗留进程/绑核);同窗单变量 A/B、warmup + ≥3s、3 轮 median;
   超轮间噪声(≥5% 或分布明确前移)才保留,否则回退留档;证据链先于修法,
   perf 先于读码猜想;无靶不吃药(§0.3.2 规则数判据)。
@@ -249,5 +249,5 @@
 - PEL doc97(发布权 claim)/ doc99(弱句柄)/ doc120(句柄原子化)/
   doc125(repeatable 统一)/ doc144(ctx 等待者)/ doc146 §0.5(方法学)/
   doc151 §4.3(对照数字)/ doc160-161(vstack/模型税);
-- 本仓 `00-plan.md`(计划/判据/台账)· `01-upper-bound-design.md`(上限路径/
-  统一收口设计)· `01-handoff-s4-s6.md`(实施交接/坑清单)。
+- 本仓 `01-plan.md`(计划/判据/台账)· `02-upper-bound-design.md`(上限路径/
+  统一收口设计)· `03-handoff-s4-s6.md`(实施交接/坑清单)。
