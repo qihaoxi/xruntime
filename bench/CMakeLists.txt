@@ -6,3 +6,6 @@ target_link_libraries(bench_roundtrip PRIVATE xr)
 
 add_executable(bench_fanin bench_fanin.c)
 target_link_libraries(bench_fanin PRIVATE xr)
+
+add_executable(bench_echo bench_echo.c)
+target_link_libraries(bench_echo PRIVATE xr)

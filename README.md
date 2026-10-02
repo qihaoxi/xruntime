@@ -19,7 +19,7 @@ A/B,为"是否值得另立高上限运行时 / 能否回灌 PEL"提供同窗测�
 | S3 | V1 同线程直投 / V2 门控 wake | ✅ 2026-10-02(未超噪声,默认关) |
 | S4 | V3 lock-free 队列 / V4 waker lifetime | ✅ 2026-10-03(V4a 未超噪声;V3 同线程 hop -45%,跨线程/B2 噪声内) |
 | S5 | V5 transport 备选(futex/io_uring/批量) | ✅ 2026-10-03(futex:RTT -88%、wait +132%;unpaced -11%) |
-| S6 | 高并发合成 echo + 总报告/决策建议 | ⬜ |
+| S6 | 高并发合成 echo + 总报告/决策建议 | ✅ 2026-10-03(见 `docs/02-final-report.md`) |
 
 ## parker 模型
 

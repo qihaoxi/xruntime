@@ -1,0 +1,111 @@
+# xruntime 02 — 总报告:S1–S6 与决策建议
+
+日期:2026-10-03 · 状态:终稿 · 上游:`docs/00-plan.md`(计划/判据/台账)、
+`docs/00-unified-constraints.md`(约束)、`docs/01-upper-bound-design.md`(上限路径)、
+`docs/01-handoff-s4-s6.md`(实施交接)
+
+> 证据纪律:全部数字为**同机同窗 release、3 轮 median**(governor=powersave
+> 未切换,只信 ≥5% 或分布明确前移);原始日志在 `bench-logs/`、`test-logs/`。
+
+## 0. TL;DR
+
+1. **PEL 残差确在 wake 机制,但主项是 transport,不是队列/registry**:跨线程
+   每对 park/wake 的 ~3µs 里,eventfd+epoll 往返是大头;换 futex 单字协议后
+   **RTT 3196→390ns(-88%)**。同线程 hop 的固定税是 mutex 队列
+   (**50→20ns,-45%**,V3)。registry 查找(V4a)无收益。
+2. **超 V0 ≥5% 的变体只有两个**:
+   - **V5 futex transport**:B1 cross -88%、B2 wait +132%、B3 echo(1 worker,
+     M=1)+602%、park 口径 +32~43%;唯一回退是 B2 unpaced **-11%**(即时唤醒
+     降低合并度,延迟换吞吐);
+   - **V3 MPSC 队列**:仅同线程 hop -45%,跨线程/B2 噪声内。
+3. **迁移建议**:transport 一项值得以"增量收敛点"回灌 PEL(候选形态:调度器
+   唤醒链唯一漏斗内做 futex/eventfd 双形态,libuv 侧走 hybrid);队列/lifetime
+   变体无收益不迁移。**另立运行时的必要性未获证明**:机制地板已测出
+   (同线程 20ns、跨线程 390ns/对),剩余对 rust 的差距更可能在 stackful 模型
+   与事件面形态(需 L0 对照轮,见 01 §0.5),而非唤醒链。
+
+## 1. 问题一:PEL 残差是否在 wake 机制?
+
+| 证据 | 数字 | 结论 |
+|---|---|---|
+| S3 同线程 hop vs 跨线程 RTT | 50ns vs 3.0µs(50×) | 直投只在同线程有空间 |
+| S3 V1(直投)/V2(门控) | 全噪声内 | 同线程 transport 已被 pending 合并消掉;门控无靶 |
+| S4 V4a(去 registry) | cross +1.6%、B2 噪声 | **registry 查找不是固定税**(单桶) |
+| S4 V3(MPSC) | 同线程 RTT 50→20ns(-45%);cross/B2 噪声 | 同线程固定税=mutex 队列 |
+| S5 V5(futex) | cross RTT 3196→390ns(-88%);B2 wait +132% | **transport 是跨线程主项** |
+| S5 V5 unpaced | -11% | 即时唤醒降低合并度(延迟↔吞吐) |
+| S6 B3 spin M=1 | 285K→2.01M rps(+602%),p50 3336→430ns | 低并发(每请求 ~1 transport)收益最大 |
+| S6 B3 park M=4 | 1.23~1.25M→1.65~1.77M rps(+32~43%),p50 -65% | 请求-响应(2 对)口径同向 |
+
+**分段归因(本机)**:
+- 同线程一对:2 RMW + 队列 ~20ns(V3 后);
+- 跨线程一对:cache line 转移 + 唤醒原语;eventfd+epoll ≈ 1.5–2.9µs,
+  futex ≈ 0.2–0.4µs(未睡零 syscall);
+- 每请求 transport 次数随并发合并下降(B3 transport/req:M=1 ~1.0 →
+  M=4 ~0.04–0.25 → M=16 ~0.04–0.05),故低并发是 transport 敏感区。
+
+**边界**:本沙盒 stackless(无栈切换),不含 PEL 的 stackful 模型税;PEL 每对
+~2.9µs 与 V0 同量级说明 PEL 的唤醒链本身没有额外浪费,差距在模型与事件面。
+
+## 2. 问题二:哪个变体在何规模超 V0 ≥5%?
+
+| 变体 | 口径 | 收益 | 判定 |
+|---|---|---|---|
+| V1 DIRECT | B1 same/cross | 噪声 | 不保留默认 |
+| V2 GATE | B1/B2 | 噪声 | 不保留默认 |
+| V3 MPSC | B1 same-thread | RTT p50 -45% | 保留 flag;跨线程无感 |
+| V4a WAKER_DIRECT | B1/B2 | 噪声(略负) | 保留 flag;H3 证伪 |
+| **V5 FUTEX** | B1 cross / B2 wait / B3 | **-88% / +132% / +32~602%** | 保留 flag;低并发必选 |
+| V5 FUTEX | B2 unpaced | **-11%** | 饱和形态回退(延迟换吞吐) |
+
+规模判据:
+- **低并发(M=1)/阻塞请求-响应**:futex 决定性(-88% RTT,+6× rps);
+- **中并发(M=4)**:+8%(spin)/+32~43%(park);
+- **高并发饱和(M=16, unpaced)**:futex 中性偏正(spin M=16 中位 +18%,
+  噪声大),但 B2 unpaced -11%——**transport 与合并度此消彼长**;
+- 同线程:futex 无差异(不睡眠路径),MPSC 队列 -45%。
+
+## 3. 问题三:回灌 PEL 还是另立运行时?
+
+**可回灌(增量收敛点)**:
+- **futex 唤醒原语**:价值最高、改动面最小(唤醒链已有唯一漏斗:
+  PEL `pel_scheduler_wakeup` + loop park)。形态建议:worker/loop 睡眠用
+  futex 单字协议(0=声明睡眠/1=awake,0→1 才 `futex_wake`),真实 IO 仍走
+  epoll;两形态在同一漏斗内按"是否已睡/是否有 fd 事件"选择。风险:libuv
+  集成需 hybrid(不能只 futex 不 epoll),须按 PEL 核心目录门禁走设计+评审;
+- **MPSC 队列**:只对同线程 hop 有意义,收益 -45% 但 PEL 瓶颈不在同线程
+  队列,优先级低。
+
+**不迁移**:
+- V1/V2(无靶)、V4a(registry 查找非税)、V4b(生命期引用计数,无证据需求)。
+
+**另立运行时**:
+- 机制地板:同线程 20ns/对、跨线程 390ns/对、阻塞 echo 单 worker
+  1.6–1.8M rps(park 口径)。若新运行时以 stackless + futex + LIFO slot +
+  内嵌 waker 为目标,理论唤醒段成本已在此量级;
+- 但**没有证据表明**唤醒机制能解释 PEL 对 rust c≥16 的 0.37–0.69×:该差距
+  更可能来自 stackful 模型税与事件面形态(recv 常驻读已收口、transport 已
+  被 libuv 合并)。**下一步唯一有判定力的实验 = L0 栈切换对照轮**
+  (01 §0.5:同一组机制变体在 stackless 与 stackman+vstack 下复跑),在此之前
+  不建议另立运行时。
+
+## 4. 执行摘要与证据位置
+
+| 阶段 | 结论 | 日志 |
+|---|---|---|
+| S1/S2 | 骨架/V0 基线(B1 RTT 3.0µs、B2 M=1 0.995) | `bench-logs/bench_{env,roundtrip,fanin}-20261002-*` |
+| S3 | V1/V2 噪声内(同线程 60ns vs 跨线程 3µs) | 同上 + `00-plan` S3 验证 |
+| S4 | V4a 噪声;V3 同线程 -45%;GATE×MPSC 丢唤醒修复 | `bench-logs/bench_{roundtrip,fanin}-20261003-00[01]*` |
+| S5 | futex -88%/+132%/-11%;单字协议契约 | `bench-logs/bench_{roundtrip,fanin}-20261003-0019~0026*` |
+| S6 | B3 echo:spin M=1 +602%、park +32~43%、transport/req 随 M 合并 | `bench-logs/bench_echo-20261003-*` |
+
+## 5. 风险与边界
+
+1. 本仓 stackless,不含 stackful 切换/栈内存税;结论不能直接等同 PEL;
+2. governor=powersave 未切换:B3 M=16 方差大,只取中位与方向;跨 session
+   数字不可比;
+3. B3 单 worker 绝对 rps 与 PEL 多 channel/rust 公开数**不可比**,只作形态
+   参照(随 K/M 的拐点与合并率趋势);
+4. 回灌 PEL 必须重新评审(PEL 00 §0.3.2 + doc155 §7.7),本报告不构成对
+   PEL 核心目录的修改依据;
+5. TSan 单次 test 栈对象报告(裸 futex 非拦截路径)28 次不复现,留档待复现。

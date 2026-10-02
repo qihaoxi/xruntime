@@ -89,7 +89,7 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 | S3 | V1/V2(H1/H4),目标:同线程链零 transport | A/B 报告 | ✅ 2026-10-02 |
 | S4 | V3/V4(H2/H3/H5),队列与 lifetime | A/B 报告 | ✅ 2026-10-03 |
 | S5 | V5 transport 备选(H6) | A/B 报告 | ✅ 2026-10-03 |
-| S6 | B3 高并发合成 + 总报告:回灌 PEL / 另立运行时 判据 | 决策建议 | ⬜ |
+| S6 | B3 高并发合成 + 总报告:回灌 PEL / 另立运行时 判据 | 决策建议 | ✅ 2026-10-03 |
 
 S1 验证(2026-10-02,本机 16 核):
 - 构建/测试五面全绿:gcc Debug、clang Debug、asan、tsan、ubsan(各 2/2);
@@ -170,6 +170,21 @@ S5 验证(2026-10-03,本机 16 核,release;governor=powersave;同窗交错 3 轮
 - 门禁:test_worker 16 flags 组合 ×(cross+same)、debug/tsan 绿、30 次 flaky
   复跑零失败;TSan 曾单次报 test 栈对象×worker 读,28 次复跑不复现(疑
   裸 futex 非 TSan 拦截路径的时序伪影),留档待复现。
+
+S6 验证(2026-10-03,本机 16 核,release;governor=powersave;B3=bench_echo):
+- B3 spin(K=256,M=16 driver 自旋口径;3 轮 median):
+  - M=1:V0 285724 → **V5 futex 2006380 rps(+602%)**,p50 3336→430ns;
+  - M=4:V0 2373189 → V5 2559982(+8%),p50 ~1072→1021ns;
+  - M=16:V0 1175281 → V5 1388493(+18%,方差大),p50 ~2.1µs 持平。
+- B3 park(driver 为 task,ack=unpark;2 对 park/wake 忠实口径):
+  - K=16,M=4:V0 1251993 → V5 1653450(+32%),p50 ~2284→631ns;
+  - K=256,M=4:V0 1233796 → V5 1766997(+43%),p50 ~1813→650ns。
+- transport/req 随并发合并下降:M=1 ~1.0 → M=4 ~0.04–0.25 →
+  M=16 ~0.04–0.05;低并发是 transport 敏感区。
+- **总报告 `docs/02-final-report.md`**:残差主项=transport(非队列/registry);
+  超 V0 ≥5% 仅 V3(同线程 -45%)与 V5(futex;-88%/+132%/+32~602%,
+  unpaced -11%);迁移建议=transport 增量收敛点回灌 PEL,另立运行时需先做
+  L0 栈切换对照轮(01 §0.5)。
 
 ## 5. 风险与边界
 
