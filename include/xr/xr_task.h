@@ -1,8 +1,10 @@
 #ifndef XR_TASK_H
 #define XR_TASK_H
 
+#include "xr/xr_ctx.h"
 #include "xr/xr_parker.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -49,6 +51,7 @@ struct xr_task
 	xr_waker_t waker;
 	xr_worker_t *owner;
 	uint64_t id;
+	xr_ctx_t *ctx;         /* L0 stackful:非 NULL 时 worker 走 ctx resume */
 	xr_task_t *ready_next; /* ready 队列链 */
 	xr_task_t *reg_next;   /* registry 桶链 */
 };
@@ -56,5 +59,18 @@ struct xr_task
 void xr_task_init(xr_task_t *t, xr_task_fn fn, void *user);
 void xr_task_spawn(xr_worker_t *w, xr_task_t *t);
 xr_parker_t *xr_task_parker(xr_task_t *t);
+
+/*
+ * L0 stackful 任务:创建独立栈,entry 在 owner worker 线程的独立栈上运行;
+ * entry 内用 xr_task_wait 阻塞等待唤醒,entry 返回即 DONE(worker 自动摘除
+ * 并销毁 ctx)。创建失败返回 -1。仅在 xr_task_spawn 之前调用。
+ */
+int xr_task_init_fibre(xr_task_t *t, xr_ctx_entry_fn entry, size_t stack_size);
+
+/*
+ * stackful 阻塞式等待(仅 t->ctx != NULL):park 判定挂起 → 让出栈;
+ * 恢复后消费 NOTIFIED 状态,与 stackless 的 step 重入语义等价。
+ */
+void xr_task_wait(xr_task_t *t);
 
 #endif

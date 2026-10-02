@@ -13,3 +13,10 @@ add_test(NAME worker COMMAND test_worker)
 add_executable(test_mpsc test_mpsc.c)
 target_link_libraries(test_mpsc PRIVATE xr)
 add_test(NAME mpsc COMMAND test_mpsc)
+
+# L0 stackful 使用自定义栈,与 ASan/TSan 不兼容;仅在 sanitizer=none 注册。
+if(XR_SANITIZE STREQUAL "none")
+  add_executable(test_ctx test_ctx.c)
+  target_link_libraries(test_ctx PRIVATE xr)
+  add_test(NAME ctx COMMAND test_ctx)
+endif()

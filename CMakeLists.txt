@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xruntime C)
+project(xruntime C ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,6 +26,8 @@ add_library(xr STATIC
   src/xr_parker.c
   src/xr_mpsc.c
   src/xr_worker.c
+  src/xr_ctx.c
+  src/xr_switch_x86_64.S
 )
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(xr PRIVATE ${XR_WARN_FLAGS})

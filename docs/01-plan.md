@@ -186,10 +186,30 @@ S6 验证(2026-10-03,本机 16 核,release;governor=powersave;B3=bench_echo):
   unpaced -11%);迁移建议=transport 增量收敛点回灌 PEL,另立运行时需先做
   L0 栈切换对照轮(01 §0.5)。
 
+S7 验证(L0 栈切换对照轮,U7;2026-10-03,同机 release,ops=200k):
+- 实现:`include/xr/xr_ctx.h` + `src/xr_ctx.c`(mmap+guard 栈)+
+  `src/xr_switch_x86_64.S`(6 push/pop,标定 **5.6ns/switch**);
+  `xr_task_init_fibre`/`xr_task_wait` 接入 worker(机制层零改动);
+  bench_roundtrip `--l0=fibre`、bench_l0(calib/create)、test_ctx。
+- B1 p50(stackless → fibre):
+  - same V0/V5:20→50ns(V5 同线程无意义,两 L0 同值);
+  - **cross V0:2.93–2.95µs → 2.99–3.01µs(+1.4~2.0%)**;
+  - **cross V5:330→360ns(+30ns,+9%)**;V5 增益 -88.8%→-88.0%,排序不变。
+- 创建/销毁(100k,16KB):**141ns → 7.20µs(51×)**;纯 switch 5.6ns
+  (快于 PEL stackman ~15ns;stackful 成本估计保守)。
+- 偏差:未复用 stackman/vstack(零第三方 + 许可;简单 mmap 非 slot pool,
+  VA/TLB 压力低于 PEL);t2 语义 fibre 在 wait 恢复后(含消费 CAS);
+  L0 测试仅 sanitizer=none 注册。
+- 判据(02 §0.5.3):跨线程 <5%/排序不变 → **保留 stackful 兼容层成立**;
+  每次切换模型税 ±30–60ns 可忽略;唯一量级差=创建/销毁 51×;
+  TLB/100K 驻留未测(需 perf,见 05)。
+- 日志:`bench-logs/bench_{roundtrip,l0}-20261003-0240*`。
+
 ## 5. 风险与边界
 
-- stackless 续体 ≠ PEL stackful fibre:resume 成本差 ~百 ns,预期不改排序;
-  若结论吃紧,补栈切换(自研或 ucontext)对照轮。
+- stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7):每次切换差
+  ±30–60ns、跨线程 V0 +1.4~2.0%、V5 排序不变 → 不否决机制结论;
+  未测项=高频创建/销毁(51×)与 TLB/100K 驻留。
 - 无 libuv 的 loop 与 uv 合并/回调时序不同:V1 同线程直投在 PEL 曾被 D8
   否决(帧寿命契约),**结论迁移回 PEL 必须重新评审**(doc155 §7.7 反绕过
   纪律同样适用);沙盒结果不直接构成对 PEL 核心目录的修改依据。

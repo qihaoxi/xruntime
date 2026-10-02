@@ -72,6 +72,36 @@ L0 栈切换       stackless(函数调用) │ stackman+vstack │ 自研最小 
    task 状态),stackless 与 stackman 各做一个实现;禁止机制层直接 include
    stackman。
 
+### 0.5.5 第一阶段结果(U7,2026-10-03)
+
+> **仪器偏差(相对 PEL)**:沙盒零第三方,未复用 stackman/vstack——stackful
+> 后端为 `src/xr_ctx.c` + `src/xr_switch_x86_64.S` 自研最小 6 push/pop
+> (**5.6ns/switch**,快于 PEL stackman ~15ns,对 stackful 有利,结论保守);
+> 栈用 mmap+guard 页(非 vstack slot pool/madvise),VA/TLB 压力低于 PEL
+> 8MB VA/fibre,创建销毁 7.2µs 与 PEL doc22 5–10µs 同量级;L0 测试仅在
+> sanitizer=none 门禁注册(自定义栈与 ASan/TSan 不兼容)。
+
+| B1(release,ops=200k,3 轮中位) | stackless p50 | fibre p50 | Δ | V5 增益 |
+|---|---|---|---|---|
+| same-thread V0 | 20ns | 50ns | +30ns | — |
+| same-thread V5 | 20ns | 50ns | +30ns | — |
+| cross-thread V0 | 2.93–2.95µs | 2.99–3.01µs | **+1.4~2.0%** | — |
+| cross-thread V5 | 330ns | 360ns | +30ns(+9%) | stackless −88.8% / fibre −88.0% |
+
+- **创建/销毁(100k,16KB 栈)**:stackless 141ns/个 vs fibre 7.20µs/个
+  (**51×**,mmap/mprotect/munmap 主导);
+- **对照判据(§0.5.3)**:
+  - 跨线程 V0 差距 <5% ✅;V5 快路径 +9%(绝对 +30ns/对,约为 PEL 实测
+    每对 ~2.9µs 的 1%);同线程绝对 +30ns(微口径放大);
+  - **变体排序不变**(V5 V0→−88% 量级;unpark 分布不变);
+  - 高频切换吞吐无差异(纯 switch 5.6ns);**创建/销毁 51× 是唯一量级差**;
+    TLB/100K 驻留未测(需 perf,见 05);
+- **结论**:机制结论与变体排序不随 L0 改变 → "保留 stackful 作 PEL 兼容层"
+  的判据成立,机制回灌不被栈模型否决;每次切换的模型税可忽略(±30–60ns),
+  PEL 对 rust 的 0.37–0.69× 不能由切换成本解释,更可能是阻塞式 API 的
+  **每请求 park 次数**与事件面形态;若目标形态含高频任务创建(per-request),
+  创建/销毁 51× 与未测的 TLB 需先补证再决定另立运行时。
+
 ## 1. 上限的定义:分段成本模型与物理下限
 
 ### 1.1 唤醒链分段
@@ -411,7 +441,7 @@ PEL 模型税的定性维持。
 | U4 | V3 SPMC 本地环 + inject | ⬜ |
 | U5 | V5 futex transport + V8 批 drain | ⬜ |
 | U6 | B1/B2/B5 全矩阵 + B6 参照(可选) + 上限判定 | ⬜ |
-| U7 | L0 对照轮:stackman+vstack 实现 `xr_ctx_switch`,机制变体复跑 + 判据 §0.5.3 | ⬜ |
+| U7 | L0 对照轮:stackman+vstack 实现 `xr_ctx_switch`,机制变体复跑 + 判据 §0.5.3 | ✅ §0.5.5(自研 asm 替代 stackman,偏差已注) |
 
 ## 8. 参考
 

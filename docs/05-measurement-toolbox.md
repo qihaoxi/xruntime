@@ -56,6 +56,18 @@ atomic_fetch_add_explicit(&w->stat_wake_writes, 1, memory_order_relaxed);
   若被测段本身只有几十 ns,插桩占比必须写进报告;
 - 对照法:插桩版 vs 非插桩版跑同一负载,差值为观测税上限。
 
+### 2.4 L0 栈切换标定与限制(stackful 对照轮)
+
+- 纯切换:`bench_l0 --mode calib`(两栈 `xr_cpu_switch` 往返,2N+2 次;
+  本机 5.6ns/switch,PEL stackman ~15ns 为对照上界);
+- 任务级:`bench_roundtrip --l0=stackless|fibre`(机制/测量点不变,只换
+  body 与 resume 原语;t2 语义 fibre 在 wait 恢复后,含消费 CAS);
+- 创建/销毁:`bench_l0 --mode create`(100k,16KB 栈)+ `/proc/self/status`
+  VmPeak/VmRSS;本机 141ns vs 7.20µs/个;
+- 限制:自定义栈与 ASan/TSan 不兼容(L0 测试仅 sanitizer=none 注册);
+  mmap 栈非 PEL vstack(slot pool/madvise),VA/TLB 压力偏低 → stackful
+  成本是**下限**,TLB/100K 驻留需 perf 补测。
+
 ## 3. L1 perf(热点与硬件计数)
 
 ```bash

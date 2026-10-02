@@ -23,6 +23,8 @@
    变体无收益不迁移。**另立运行时的必要性未获证明**:机制地板已测出
    (同线程 20ns、跨线程 390ns/对),剩余对 rust 的差距更可能在 stackful 模型
    与事件面形态(需 L0 对照轮,见 01 §0.5),而非唤醒链。
+   **L0 对照轮已做(§3.6)**:每次切换模型税 ±30–60ns,跨线程 V0 +1.4~2.0%、
+   V5 排序不变 → 不被栈模型否决;量级差只剩高频创建/销毁(51×)与未测 TLB。
 
 ## 1. 问题一:PEL 残差是否在 wake 机制?
 
@@ -44,7 +46,7 @@
 - 每请求 transport 次数随并发合并下降(B3 transport/req:M=1 ~1.0 →
   M=4 ~0.04–0.25 → M=16 ~0.04–0.05),故低并发是 transport 敏感区。
 
-**边界**:本沙盒 stackless(无栈切换),不含 PEL 的 stackful 模型税;PEL 每对
+**边界**:沙盒默认 stackless;L0 对照轮(§3.6)已补 stackful 后端。PEL 每对
 ~2.9µs 与 V0 同量级说明 PEL 的唤醒链本身没有额外浪费,差距在模型与事件面。
 
 ## 2. 问题二:哪个变体在何规模超 V0 ≥5%?
@@ -90,9 +92,9 @@
   内嵌 waker 为目标,理论唤醒段成本已在此量级;
 - 但**没有证据表明**唤醒机制能解释 PEL 对 rust c≥16 的 0.37–0.69×:该差距
   更可能来自 stackful 模型税与事件面形态(recv 常驻读已收口、transport 已
-  被 libuv 合并)。**下一步唯一有判定力的实验 = L0 栈切换对照轮**
-  (01 §0.5:同一组机制变体在 stackless 与 stackman+vstack 下复跑),在此之前
-  不建议另立运行时。
+  被 libuv 合并)。**L0 栈切换对照轮已做(§3.6)**:每次切换税 ±30–60ns、
+  跨线程 V0 +1.4~2.0%、V5 排序不变 → 机制结论不被栈模型否决;另立运行时
+  的必要性仍集中在"高频创建/销毁(51×)+ TLB(未测)"与编程模型,不在唤醒链。
 
 ### 3.5 回灌收益预估与验证计划
 
@@ -127,6 +129,26 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 `strace -c`、perf;≥5% 或分布明确前移才保留。走 PEL 核心目录设计评审
 (doc155 §7.7),沙盒结论不构成修改依据。
 
+### 3.6 L0 栈切换对照轮结果(U7,2026-10-03)
+
+> 仪器:自研最小 6 push/pop asm(`xr_switch_x86_64.S`,标定 **5.6ns/switch**,
+> 快于 PEL stackman ~15ns→结论保守);mmap+guard 栈(非 vstack slot pool,
+> VA/TLB 压力低于 PEL);完整偏差与判据见 02 §0.5.5、01 S7。
+
+| B1(release,ops=200k) | stackless p50 | fibre p50 | Δ |
+|---|---|---|---|
+| same-thread V0 / V5 | 20ns | 50ns | +30ns(微口径) |
+| cross-thread V0 | 2.93–2.95µs | 2.99–3.01µs | **+1.4~2.0%** |
+| cross-thread V5 | 330ns | 360ns | +30ns(+9%) |
+
+- **V5 增益不变**:stackless −88.8% / fibre −88.0%,变体排序与 unpark 分布
+  不变 → **机制结论可回灌 stackful PEL,不被栈模型否决**;
+- **创建/销毁**:141ns vs 7.20µs/个(**51×**,mmap/mprotect/munmap);
+  高频任务创建(per-request)形态下这是唯一量级差,PEL 侧靠 vstack slot
+  pool 复用摊薄,需要时再以同窗 A/B 验证;
+- **未测**:TLB/100K 并发驻留(需 perf);本次栈 16KB、无 vstack 的
+  madvise/零页语义,真实 vstack 税只会更高不会更低。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -136,10 +158,13 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S4 | V4a 噪声;V3 同线程 -45%;GATE×MPSC 丢唤醒修复 | `bench-logs/bench_{roundtrip,fanin}-20261003-00[01]*` |
 | S5 | futex -88%/+132%/-11%;单字协议契约 | `bench-logs/bench_{roundtrip,fanin}-20261003-0019~0026*` |
 | S6 | B3 echo:spin M=1 +602%、park +32~43%、transport/req 随 M 合并 | `bench-logs/bench_echo-20261003-*` |
+| S7 | L0 对照:cross V0 +1.4~2.0%、V5 排序不变、创建 51×、切换 5.6ns | `bench-logs/bench_{roundtrip,l0}-20261003-0240*` |
 
 ## 5. 风险与边界
 
-1. 本仓 stackless,不含 stackful 切换/栈内存税;结论不能直接等同 PEL;
+1. 沙盒默认 stackless;S7 补了 stackful 对照(自研 asm+简单 mmap 栈),
+   不含 PEL vstack 的 madvise/slot pool/TLB 税,stackful 成本是**下限**,
+   结论不能直接等同 PEL;
 2. governor=powersave 未切换:B3 M=16 方差大,只取中位与方向;跨 session
    数字不可比;
 3. B3 单 worker 绝对 rps 与 PEL 多 channel/rust 公开数**不可比**,只作形态

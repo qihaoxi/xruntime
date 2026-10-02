@@ -305,6 +305,23 @@ static void worker_run_task(xr_worker_t *w, xr_task_t *t)
 	int rc;
 
 	atomic_fetch_add_explicit(&w->stat_runs, 1, memory_order_relaxed);
+
+	/* L0 stackful:entry 在独立栈上运行,经 xr_task_wait/xr_ctx_suspend
+	 * 让出;resume 返回时或 PARKED(deliver 已入队)或 DONE(摘除+销毁)。 */
+	if (t->ctx != NULL)
+	{
+		xr_ctx_resume(t->ctx);
+		if (xr_ctx_state(t->ctx) == XR_CTX_DONE)
+		{
+			xr_ctx_destroy(t->ctx);
+			t->ctx = NULL;
+			pthread_mutex_lock(&w->lock);
+			reg_remove_locked(w, t);
+			pthread_mutex_unlock(&w->lock);
+		}
+		return;
+	}
+
 	rc = t->fn(t);
 	if (rc == XR_TASK_RUN_AGAIN)
 	{
@@ -564,4 +581,31 @@ void xr_task_spawn(xr_worker_t *w, xr_task_t *t)
 	pthread_mutex_unlock(&w->lock);
 	worker_enqueue(w, t); /* L2:注册先于入队(MPSC 模式锁外入环) */
 	worker_wake(w);
+}
+
+/* ---------- L0 stackful 任务 ---------- */
+
+int xr_task_init_fibre(xr_task_t *t, xr_ctx_entry_fn entry, size_t stack_size)
+{
+	xr_ctx_t *c;
+
+	memset(t, 0, sizeof(*t));
+	c = xr_ctx_create(t, entry, stack_size);
+	if (c == NULL)
+	{
+		return -1;
+	}
+	t->ctx = c;
+	return 0;
+}
+
+void xr_task_wait(xr_task_t *t)
+{
+	if (xr_parker_park(&t->parker) == XR_PARK_SUSPENDED)
+	{
+		xr_ctx_suspend(t->ctx);
+		/* 恢复:状态为 NOTIFIED,消费之(等价 stackless step 重入时
+		 * 的 park CONSUMED),使下一次 wait 从 IDLE 重新声明睡眠。 */
+		(void)xr_parker_park(&t->parker);
+	}
 }

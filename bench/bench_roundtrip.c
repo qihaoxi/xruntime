@@ -15,9 +15,11 @@
  *  cross-thread(默认):producer(prodcpu) unpark → worker(wkcpu) 上 task 恢复。
  *  same-thread(--same-thread):producer/consumer 两个 task 同 worker 互踢。
  * 段:t0=unpark 进入,t1=unpark 返回(claim/publish/deliver/registry/队列/
- * transport 全含),t2=消费侧 step 开始(传输+loop tick+调度+恢复)。
+ * transport 全含),t2=消费侧恢复(传输+loop tick+调度+恢复)。
+ *  L0 对照(--l0=fibre):同一机制(flags 不变)换成 stackful 阻塞式 body;
+ *  stackless 的 t2 在 step 入口,fibre 的 t2 在 xr_task_wait 恢复后(含消费)。
  *   bench_roundtrip [--ops N] [--wkcpu C] [--prodcpu C]
- *                   [--same-thread] [--flags N]
+ *                   [--same-thread] [--flags N] [--l0=stackless|fibre]
  */
 
 typedef struct
@@ -36,6 +38,8 @@ typedef struct
 	_Atomic uint64_t cur;
 	_Atomic uint64_t resume_idx;
 	_Atomic int ready;
+	_Atomic int stop; /* fibre:终止信号 */
+	_Atomic int done; /* fibre:entry 即将返回 */
 } rt_t;
 
 static int rt_step(xr_task_t *t)
@@ -88,6 +92,7 @@ typedef struct
 	int ops;
 	_Atomic uint64_t idx;
 	_Atomic int ready;
+	_Atomic int prod_done; /* fibre:entry 即将返回 */
 	uint64_t res_count[3];
 } rt_prod_t;
 
@@ -130,6 +135,64 @@ static int rt_prod_step(xr_task_t *t)
 	}
 }
 
+/* ---------- L0 stackful body(阻塞式,机制/测量点与 stackless 相同) ---------- */
+
+static void rtf_cons_entry(xr_task_t *t)
+{
+	rt_t *c = t->user;
+
+	atomic_store_explicit(&c->ready, 1, memory_order_release);
+	for (;;)
+	{
+		xr_task_wait(t);
+		if (atomic_load_explicit(&c->stop, memory_order_acquire) != 0)
+		{
+			break;
+		}
+		{
+			uint64_t i = atomic_load_explicit(&c->cur,
+							  memory_order_acquire);
+			uint64_t t2 = xr_tsc();
+
+			c->samples[i].t2 = t2;
+			atomic_store_explicit(&c->resume_idx, i + 1,
+					      memory_order_release);
+			if (c->next != NULL)
+			{
+				xr_parker_unpark(c->next, i);
+			}
+		}
+	}
+	atomic_store_explicit(&c->done, 1, memory_order_release);
+}
+
+static void rtf_prod_entry(xr_task_t *t)
+{
+	rt_prod_t *p = t->user;
+	rt_t *c = p->cons;
+
+	atomic_store_explicit(&p->ready, 1, memory_order_release);
+	xr_task_wait(t); /* 主线程 kick */
+	for (uint64_t i = 0; i < (uint64_t)p->ops; i++)
+	{
+		uint64_t t0, t1;
+		xr_unpark_result_t ur;
+
+		atomic_store_explicit(&c->cur, i, memory_order_release);
+		t0 = xr_tsc();
+		ur = xr_parker_unpark(&c->task.parker, i);
+		t1 = xr_tsc();
+		c->samples[i].t0 = t0;
+		c->samples[i].t1 = t1;
+		c->samples[i].res = (uint8_t)ur;
+		p->res_count[ur]++;
+		xr_task_wait(t);
+	}
+	atomic_store_explicit(&c->stop, 1, memory_order_release);
+	xr_parker_unpark(&c->task.parker, 0);
+	atomic_store_explicit(&p->prod_done, 1, memory_order_release);
+}
+
 static int cmp_u64(const void *a, const void *b)
 {
 	uint64_t x = *(const uint64_t *)a;
@@ -169,6 +232,7 @@ int main(int argc, char **argv)
 	int prodcpu = 2;
 	int neg = 0;
 	int same_thread = 0;
+	int l0_fibre = 0;
 	unsigned flags = 0;
 	rt_t *c;
 	xr_worker_t *w;
@@ -198,6 +262,10 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[i], "--same-thread") == 0)
 		{
 			same_thread = 1;
+		}
+		else if (strcmp(argv[i], "--l0") == 0 && i + 1 < argc)
+		{
+			l0_fibre = strcmp(argv[++i], "fibre") == 0;
 		}
 	}
 
@@ -235,8 +303,22 @@ int main(int argc, char **argv)
 		p->cons = c;
 		p->ops = ops;
 		c->next = &p->task.parker;
-		xr_task_init(&c->task, rt_step, c);
-		xr_task_init(&p->task, rt_prod_step, p);
+		if (l0_fibre != 0)
+		{
+			if (xr_task_init_fibre(&c->task, rtf_cons_entry, 0) != 0 ||
+			    xr_task_init_fibre(&p->task, rtf_prod_entry, 0) != 0)
+			{
+				XR_LOGE("fibre init failed");
+				return 1;
+			}
+			c->task.user = c;
+			p->task.user = p;
+		}
+		else
+		{
+			xr_task_init(&c->task, rt_step, c);
+			xr_task_init(&p->task, rt_prod_step, p);
+		}
 		xr_task_spawn(w, &p->task);
 		xr_task_spawn(w, &c->task);
 
@@ -247,15 +329,30 @@ int main(int argc, char **argv)
 		}
 		t_start = xr_now_ns();
 		xr_parker_unpark(&p->task.parker, 0);
-		while (atomic_load_explicit(&p->idx, memory_order_acquire) <
-		       (uint64_t)ops)
+		if (l0_fibre != 0)
 		{
-			xr_cpu_relax();
+			while (atomic_load_explicit(&p->prod_done,
+						    memory_order_acquire) == 0 ||
+			       atomic_load_explicit(&c->done,
+						    memory_order_acquire) == 0)
+			{
+				xr_cpu_relax();
+			}
 		}
-		while (atomic_load_explicit(&c->resume_idx, memory_order_acquire) <
-		       (uint64_t)ops)
+		else
 		{
-			xr_cpu_relax();
+			while (atomic_load_explicit(&p->idx,
+						    memory_order_acquire) <
+			       (uint64_t)ops)
+			{
+				xr_cpu_relax();
+			}
+			while (atomic_load_explicit(&c->resume_idx,
+						    memory_order_acquire) <
+			       (uint64_t)ops)
+			{
+				xr_cpu_relax();
+			}
 		}
 		t_end = xr_now_ns();
 		for (int i = 0; i < 3; i++)
@@ -266,7 +363,19 @@ int main(int argc, char **argv)
 	}
 	else
 	{
-		xr_task_init(&c->task, rt_step, c);
+		if (l0_fibre != 0)
+		{
+			if (xr_task_init_fibre(&c->task, rtf_cons_entry, 0) != 0)
+			{
+				XR_LOGE("fibre init failed");
+				return 1;
+			}
+			c->task.user = c;
+		}
+		else
+		{
+			xr_task_init(&c->task, rt_step, c);
+		}
 		xr_task_spawn(w, &c->task);
 
 		if (xr_pin_to_cpu(prodcpu) != 0)
@@ -302,6 +411,16 @@ int main(int argc, char **argv)
 				xr_cpu_relax();
 			}
 		}
+		if (l0_fibre != 0)
+		{
+			atomic_store_explicit(&c->stop, 1, memory_order_release);
+			xr_parker_unpark(&c->task.parker, 0);
+			while (atomic_load_explicit(&c->done,
+						    memory_order_acquire) == 0)
+			{
+				xr_cpu_relax();
+			}
+		}
 		t_end = xr_now_ns();
 	}
 
@@ -322,9 +441,10 @@ int main(int argc, char **argv)
 	}
 
 	xr_worker_stats(w, &wstats);
-	printf("bench_roundtrip: ops=%d wkcpu=%d prodcpu=%d mode=%s flags=%u\n",
-	       ops, wkcpu, prodcpu, same_thread != 0 ? "same-thread" : "cross-thread",
-	       flags);
+	printf("bench_roundtrip: ops=%d wkcpu=%d prodcpu=%d mode=%s l0=%s flags=%u\n",
+	       ops, wkcpu, prodcpu,
+	       same_thread != 0 ? "same-thread" : "cross-thread",
+	       l0_fibre != 0 ? "fibre" : "stackless", flags);
 	printf("  unpark: deliver=%" PRIu64 " stored=%" PRIu64
 	       " merged=%" PRIu64 " neg_delta=%d\n",
 	       res_count[XR_UNPARK_DELIVER], res_count[XR_UNPARK_STORED],

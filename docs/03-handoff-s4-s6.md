@@ -164,7 +164,7 @@ S1–S3 已完成)。**开工前先读 01-plan §0–§3 与本文件 §1/§2。
 > 状态(2026-10-03):S6 ✅。`bench/bench_echo.c`(spin/park 双口径)落地;
 > B3 结果与三问决策见 `docs/04-final-report.md` 与 01-plan S6 验证。
 > S1–S6 全部完成;后续候选:transport 回灌 PEL 的设计评审、L0 栈切换
-> 对照轮(01 §0.5)。
+> 对照轮(01 §0.5)——**L0 轮已于 S7 完成**(01 S7 / 02 §0.5.5 / 04 §3.6)。
 
 ### 5.1 B3 设计
 - `bench/bench_echo.c`:K 个 conn task(单 worker;K=1/16/256/4096),M 个
@@ -219,7 +219,8 @@ S1–S3 已完成)。**开工前先读 01-plan §0–§3 与本文件 §1/§2。
    B2 wait/unpaced M=1/4/8(命令见 README「构建与基准」)。
 5. S1–S6 全部完成(S3–S6 见 §3/§4/§5 状态,总报告
    `docs/04-final-report.md`);后续候选:transport 回灌 PEL 设计评审、
-   L0 栈切换对照轮(01 §0.5)。
+   L0 栈切换对照轮(01 §0.5)——L0 轮已于 S7 完成(01 S7 / 02 §0.5.5 /
+   04 §3.6)。
 
 并行事项(不属本仓):PEL 侧 macOS 构建修复已推两个 commit
 (`2ce8a740` vmem MADV_NOHUGEPAGE 守卫、`3ae00936` C11 标签后声明),等用户
