@@ -18,7 +18,9 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
   - `scripts/run-tests.sh <profile>`(ctest:smoke/parker/worker);
   - `scripts/run-bench.sh <profile> <bench> [args]`(日志 `bench-logs/`,构建测试 `test-logs/`);
   - `scripts/env-check.sh`(跑基准前必跑:核数/governor/遗留进程/绑核)。
-- 五面门禁(每变体必过):gcc Debug、clang Debug、asan、tsan、ubsan 各 3/3。
+- 门禁(2026-10-02 用户指示分级):默认 `debug` 构建 + 相关 ctest;asan/tsan/
+  ubsan 按需;五面全量(gcc/clang Debug、asan、tsan、ubsan 各 3/3)改为按需/
+  里程碑,不再每变体强制。
 - 本机环境:16 核;governor=**powersave**(无 root 未切,见 §6.4);
   release 下 tsc_hz≈3.79GHz、now_ns=19ns/op、tsc_read=11ns/op(S1 bench_env)。
 
@@ -76,6 +78,11 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 
 ## 3. S4:V3 lock-free MPSC / V4 waker lifetime(H2/H3/H5)
 
+> 状态(2026-10-03):V4a ✅ 未超噪声(不作默认);V3 ✅ 同线程 hop
+> RTT p50 50→20ns(-45%),跨线程/B2 噪声内;H2/H3 证伪。GATE×MPSC 丢唤醒
+> 已修为"MPSC|GATE 时 GATE 自动失效"(constraints §4.2)。结果见 00-plan
+> S4 验证;下一步 S5。
+
 ### 3.1 目标
 同线程 hop 60ns 与跨线程 producer_side 1.29µs 里,mutex+registry 是固定税;
 砍掉/替换它们,看能否超噪声。**建议顺序:V4a → V3;V4b 仅在生命期出问题时做。**
@@ -119,12 +126,18 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 
 ### 3.5 S4 执行流程与判定(每个变体)
 1. 实现(默认 flag=0 行为不变)→ 2. 扩 test_worker 覆盖该 flag →
-3. 五面绿 → 4. 同窗 A/B:flags=0 与变体各 3 轮 median,同机同 session,
+3. debug 构建 + 相关测试绿(并发改动按需加 tsan;五面全量按里程碑,见 §0)
+→ 4. 同窗 A/B:flags=0 与变体各 3 轮 median,同机同 session,
    B1 same/cross + B2 wait/unpaced 至少各一组 → 5. 超噪声(≥5% 或延迟分布
    明确前移)才保留默认;否则保留 flag 但标"未超噪声",台账留档。
 每步更新 `docs/00-plan.md` 台账 S4 与 README 状态表。
 
 ## 4. S5:V5 transport 备选(H6)
+
+> 状态(2026-10-03):V5 futex ✅。B1 cross RTT 3196→390ns(-88%)、B2 wait
+> 1.99→4.62 Mops/s(+132%)、unpaced -11%(延迟换吞吐);H6 证实(transport
+> 是跨线程每对 ~3µs 主项)。单字协议/契约见 00-plan S5 验证与
+> constraints §4.2;下一步 S6。
 
 - flag:`XR_WORKER_FUTEX = 1u << 5`(futex 模式替代 epoll 主循环;本沙盒暂无
   真实 IO,事件面只有唤醒)。
@@ -191,14 +204,16 @@ S1–S3 已完成)。**开工前先读 00-plan §0–§3 与本文件 §1/§2。
 
 ## 7. 下个会话第一步(检查表)
 
-1. `cd ~/workspace/xruntime && git log --oneline -4` → 期望 `8c7b734`(S3)。
+1. `cd ~/workspace/xruntime && git log --oneline -4` → 期望 `1677514`(交接)
+   或其后 S4 提交。
 2. 读 `docs/00-plan.md` §0–§3 + 本文件 §1–§2。
-3. `./scripts/env-check.sh`;五面跑一遍确认基线绿:
-   `./scripts/build.sh debug && ./scripts/run-tests.sh debug`,
-   `XR_CC=clang ...`,asan/tsan/ubsan(见 §0)。
+3. `./scripts/env-check.sh`;跑 debug 基线确认绿:
+   `./scripts/build.sh debug && ./scripts/run-tests.sh debug`
+   (sanitizer 按需;五面全量按里程碑,见 §0)。
 4. 同 session 重测 flags=0 对照:B1 same-thread、B1 cross-thread、
    B2 wait/unpaced M=1/4/8(命令见 README「构建与基准」)。
-5. 按 §3.5 流程做 **S4a V4a 直接 waker**,判定后更新台账+本文件状态,提交。
+5. S4/S5 已完成(见 §3/§4 状态);下一步按 §5 做 **S6 B3 合成 echo +
+   总报告**(`docs/02-final-report.md`),判定回灌 PEL / 另立运行时。
 
 并行事项(不属本仓):PEL 侧 macOS 构建修复已推两个 commit
 (`2ce8a740` vmem MADV_NOHUGEPAGE 守卫、`3ae00936` C11 标签后声明),等用户

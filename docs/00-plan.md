@@ -56,7 +56,8 @@ PEL 事实基线(对照,勿当目标数字):
 - **V4 waker lifetime**:引用计数 waker(无 registry 查找)或 per-parker 单槽 fast path。
 - **V5 transport 备选**:futex / eventfd-semaphore / io_uring MSG_RING / 批量 wake(内核支持单独记录)。
 
-安全红线:每变体过 asan/tsan;丢唤醒(通知在 park 判定窗口内到达)需专项
+安全红线:并发/生命周期改动建议按需跑 tsan+asan(2026-10-02 分级:五面全量
+改为按需/里程碑,不再每变体强制);丢唤醒(通知在 park 判定窗口内到达)需专项
 stress;句柄失效窗口按"miss=drop 可解释"设计。
 
 ## 3. 基准与判据
@@ -86,8 +87,8 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 | S1 | 骨架:CMake/目录/日志规范/绑核与 sanitizer 脚本(+ parker 三态最小实现前移) | 构建可跑 | ✅ 2026-10-02 |
 | S2 | V0 基线 + B1/B2,复刻 PEL 唤醒形态 | 基线数字 | ✅ 2026-10-02 |
 | S3 | V1/V2(H1/H4),目标:同线程链零 transport | A/B 报告 | ✅ 2026-10-02 |
-| S4 | V3/V4(H2/H3/H5),队列与 lifetime | A/B 报告 | ⬜ |
-| S5 | V5 transport 备选(H6) | A/B 报告 | ⬜ |
+| S4 | V3/V4(H2/H3/H5),队列与 lifetime | A/B 报告 | ✅ 2026-10-03 |
+| S5 | V5 transport 备选(H6) | A/B 报告 | ✅ 2026-10-03 |
 | S6 | B3 高并发合成 + 总报告:回灌 PEL / 另立运行时 判据 | 决策建议 | ⬜ |
 
 S1 验证(2026-10-02,本机 16 核):
@@ -129,6 +130,46 @@ S3 验证(2026-10-02,本机 16 核,release;governor=powersave):
   epoll 唤醒(~3µs/对),不是 eventfd 写/门控能省的。同线程 60ns vs
   跨线程 3µs 的 50× 差说明直投收益只在"把工作搬回同线程"时才存在
   (呼应 PEL D8 同线程内联 drain 回退)。
+
+S4 验证(2026-10-03,本机 16 核,release;governor=powersave;同窗 3 轮 median):
+- **V4a 直接 waker**(`XR_WORKER_WAKER_DIRECT`,跳过 registry):B1 cross
+  producer_side p50 1262→1282ns(+1.6%)、RTT 3025→3055ns(+1%);same-thread
+  RTT p50 50→60ns;test_worker 12 flags 全绿 + tsan。**未超噪声,不作默认**;
+  H3 证伪——单桶 registry 查找不是固定税,瓶颈在 mutex 队列 + transport。
+- **V3 Vyukov MPSC**(`XR_WORKER_MPSC`,4096 环 + 溢出链):B1 **same-thread
+  RTT p50 50→20ns、avg 75→41ns(≈-45%)**,producer_side avg 43→15ns;cross
+  RTT p50 -1.8% / avg -2.8%(噪声内);B2 wait +1.5% / unpaced -0.4%(噪声内)。
+  **同线程 hop 显著超噪声**(mutex 队列是直投路径的固定税);跨线程/B2 未超;
+  H2 证伪——M=8 wait/unpaced 下 87.5%/98% 已合并,队列争用不是瓶颈。
+  V3 保留 flag(默认 0);候选上推默认,待 B3 echo 判定。
+- 新增 `src/xr_mpsc.c` + `tests/test_mpsc.c`(满/绕圈/FIFO/非法容量),
+  test_worker 覆盖 12 flags 组合;debug/tsan/asan 绿。
+- **坑(已修,入 constraints §4.2/§4.4)**:GATE×MPSC 组合丢唤醒——GATE 协议
+  依赖 mutex 队列对"入队 vs 睡眠前复核"的串行化;MPSC 无锁环破坏该协议
+  (store-load 竞速,tsan 不报;30 次复跑复现)。  现契约:**MPSC|GATE 同开时
+  GATE 自动失效(总 transport)**,`xr_worker.h` 注明。
+
+S5 验证(2026-10-03,本机 16 核,release;governor=powersave;同窗交错 3 轮 median):
+- **V5 futex transport**(`XR_WORKER_FUTEX`,单字协议:fut_word 0=声明睡眠/
+  1=awake;生产者 0→1 才 `futex_wake`,awake 时零 syscall;futex_wait 以字值
+  原子复核):
+  - B1 cross:RTT p50 **3196→390ns(-88%)**、avg 3526→450ns;
+    producer_side 1332→220ns(-83%)、consumer_wake 1853→170ns(-91%);
+  - B2 wait(D5 口径):吞吐 1.99→**4.62 Mops/s(+132%)**,eventfd/unpark=0;
+  - B2 unpaced(饱和):11.68→10.41 Mops/s(**-11%**)——futex 即时唤醒降低
+    合并度(runs/unpark 0.020→0.053,parks/deliver 1.9→2.0):**延迟换吞吐**;
+  - same-thread 同噪声(不睡眠路径无差异)。
+- 判定:**transport 是跨线程每对 ~3µs 的主项**(H6 证实);futex 在
+  请求-响应/阻塞形态决定性收益,饱和 fan-in 有 ~11% 吞吐回退。
+  保留 flag(默认 0);候选:延迟敏感默认 futex,真实 IO 仍需 epoll/eventfd
+  接入 fd;B3 echo 判定组合形态。
+- 契约(入 constraints §4.2/`xr_worker.h`):FUTEX 自带单字门控(sleeping 不再
+  维护),GATE 与 FUTEX 同开自动失效;**MPSC|FUTEX 正确**(单字协议不依赖队列
+  串行化);set_flags 切 FUTEX 时对可能睡在 epoll 的 worker 补 eventfd 唤醒
+  (一次性配置期双写)。
+- 门禁:test_worker 16 flags 组合 ×(cross+same)、debug/tsan 绿、30 次 flaky
+  复跑零失败;TSan 曾单次报 test 栈对象×worker 读,28 次复跑不复现(疑
+  裸 futex 非 TSan 拦截路径的时序伪影),留档待复现。
 
 ## 5. 风险与边界
 

@@ -58,6 +58,8 @@ static void run_cross_thread(unsigned flags)
 	wk_t c = { 0 };
 	xr_worker_stats_t stats;
 
+	fprintf(stderr, "  cross flags=%u\n", flags);
+
 	CHECK(w != NULL);
 	if (w == NULL)
 	{
@@ -90,8 +92,15 @@ static void run_cross_thread(unsigned flags)
 
 	xr_worker_stats(w, &stats);
 	CHECK(stats.delivers == (uint64_t)n);
-	CHECK(stats.wake_writes > 0);
-	CHECK(stats.wake_writes <= (uint64_t)n);
+	if ((flags & XR_WORKER_FUTEX) != 0)
+	{
+		CHECK(stats.wake_futex > 0);
+	}
+	else
+	{
+		CHECK(stats.wake_writes > 0);
+		CHECK(stats.wake_writes <= (uint64_t)n);
+	}
 	CHECK(stats.runs >= (uint64_t)n);
 
 	xr_worker_destroy(w);
@@ -145,6 +154,8 @@ static void run_same_thread(unsigned flags)
 	_Atomic uint64_t total = 0;
 	xr_worker_stats_t stats;
 
+	fprintf(stderr, "  same  flags=%u\n", flags);
+
 	CHECK(w != NULL);
 	if (w == NULL)
 	{
@@ -195,6 +206,19 @@ int main(void)
 		XR_WORKER_DIRECT,
 		XR_WORKER_GATE,
 		XR_WORKER_DIRECT | XR_WORKER_GATE,
+		XR_WORKER_WAKER_DIRECT,
+		XR_WORKER_WAKER_DIRECT | XR_WORKER_DIRECT | XR_WORKER_GATE,
+		XR_WORKER_MPSC,
+		XR_WORKER_MPSC | XR_WORKER_DIRECT,
+		XR_WORKER_MPSC | XR_WORKER_GATE,
+		XR_WORKER_MPSC | XR_WORKER_DIRECT | XR_WORKER_GATE,
+		XR_WORKER_MPSC | XR_WORKER_WAKER_DIRECT,
+		XR_WORKER_MPSC | XR_WORKER_WAKER_DIRECT | XR_WORKER_DIRECT |
+			XR_WORKER_GATE,
+		XR_WORKER_FUTEX,
+		XR_WORKER_FUTEX | XR_WORKER_DIRECT,
+		XR_WORKER_FUTEX | XR_WORKER_GATE,
+		XR_WORKER_FUTEX | XR_WORKER_MPSC,
 	};
 
 	for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++)
@@ -208,6 +232,7 @@ int main(void)
 		fprintf(stderr, "worker: %d failure(s)\n", failures);
 		return 1;
 	}
-	printf("worker: OK (4 flags x cross-thread+same-thread)\n");
+	printf("worker: OK (%zu flags x cross-thread+same-thread)\n",
+	       sizeof(variants) / sizeof(variants[0]));
 	return 0;
 }

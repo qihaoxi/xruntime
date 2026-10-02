@@ -16,6 +16,12 @@
  *   -> registry(弱句柄 id)解析 -> ready 队列(mutex) -> 事件面(eventfd,
  *   libuv async-pending 式合并)。task 不直接暴露给唤醒方,唤醒方持 parker 指针,
  *   deliver 侧经 xr_waker_t{worker,id} 弱句柄解析,便于 V4 替换 lifetime 方案。
+ *
+ * V4a(XR_WORKER_WAKER_DIRECT):deliver ctx 直接为 task 指针,跳过 registry
+ *   查找与注册。**生命期前置条件(硬性)**:task 对象必须活过所有 in-flight
+ *   unpark(deliver 在 unpark 调用线程同步执行);沙盒内 task 为栈/静态对象,
+ *   生产者 join 后才 destroy worker,满足该条件。真实运行时若 task 可提前
+ *   销毁,需引用计数 waker(V4b)兜底。
  */
 
 typedef struct xr_worker xr_worker_t;

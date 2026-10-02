@@ -2,14 +2,18 @@
 
 #include "xr/xr_env.h"
 #include "xr/xr_log.h"
+#include "xr/xr_mpsc.h"
 
 #include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #define XR_REG_BUCKETS 1024u
@@ -24,19 +28,22 @@ struct xr_worker
 	int started;
 	pthread_t thread;
 	pthread_mutex_t lock; /* registry + ready 队列(V0:单锁,对齐 PEL sched->lock) */
-	xr_task_t *ready_head;
+	xr_task_t *ready_head; /* V0 主队列;V3=溢出链 */
 	xr_task_t *ready_tail;
+	xr_mpsc_t *mpsc;       /* V3:lock-free 主队列 */
 	xr_task_t *reg[XR_REG_BUCKETS];
 	uint64_t next_id;
-	_Atomic unsigned flags;        /* XR_WORKER_DIRECT / XR_WORKER_GATE */
+	_Atomic unsigned flags;        /* XR_WORKER_DIRECT / GATE / MPSC / WAKER_DIRECT */
 	_Atomic uint32_t wake_pending; /* libuv async-pending 式合并 */
 	_Atomic uint32_t sleeping;     /* V2:worker 正在(或即将)epoll_wait */
+	_Atomic uint32_t fut_word;     /* V5:futex 睡眠字(0=可睡,1=已唤醒) */
 	_Atomic uint32_t stop;
 	_Atomic uint64_t stat_wake_writes;
 	_Atomic uint64_t stat_delivers;
 	_Atomic uint64_t stat_runs;
 	_Atomic uint64_t stat_wake_direct;
 	_Atomic uint64_t stat_wake_gated;
+	_Atomic uint64_t stat_wake_futex;
 };
 
 /* ---------- ready 队列(调用方持 lock) ---------- */
@@ -69,6 +76,40 @@ static xr_task_t *pop_ready_locked(xr_worker_t *w)
 		w->ready_tail = NULL;
 	}
 	t->ready_next = NULL;
+	return t;
+}
+
+/* 入队唯一漏斗:V3 先走 MPSC 环(满/未启用→ready 链表=溢出链,持 lock)。 */
+static void worker_enqueue(xr_worker_t *w, xr_task_t *t)
+{
+	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
+
+	if ((flags & XR_WORKER_MPSC) != 0 && xr_mpsc_try_push(w->mpsc, t))
+	{
+		return;
+	}
+	pthread_mutex_lock(&w->lock);
+	push_ready_locked(w, t);
+	pthread_mutex_unlock(&w->lock);
+}
+
+/* 出队唯一漏斗:V3 先 MPSC 环,再溢出链。 */
+static xr_task_t *worker_dequeue(xr_worker_t *w)
+{
+	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
+	xr_task_t *t = NULL;
+
+	if ((flags & XR_WORKER_MPSC) != 0)
+	{
+		t = xr_mpsc_pop(w->mpsc);
+		if (t != NULL)
+		{
+			return t;
+		}
+	}
+	pthread_mutex_lock(&w->lock);
+	t = pop_ready_locked(w);
+	pthread_mutex_unlock(&w->lock);
 	return t;
 }
 
@@ -113,7 +154,22 @@ static void reg_remove_locked(xr_worker_t *w, xr_task_t *t)
 
 /* ---------- 事件面(PEL:uv_async_send 恒发,libuv 侧 pending 合并) ---------- */
 
-static void worker_wake(xr_worker_t *w)
+/* V5:futex 睡眠字置位 + 唤醒。worker 睡眠前清零(先于 sleeping=1),
+ * 生产者见 sleeping=1 后置位;futex_wait 以字值做原子复核,不丢唤醒。
+ * 0→1 才发 futex_wake(latch 合并):与 eventfd pending 同型,避免
+ * 饱和形态下每次 deliver 一个 syscall。 */
+static void worker_futex_wake(xr_worker_t *w)
+{
+	if (atomic_exchange_explicit(&w->fut_word, 1, memory_order_acq_rel) == 0)
+	{
+		(void)syscall(SYS_futex, &w->fut_word, FUTEX_WAKE_PRIVATE, 1,
+			      NULL, NULL, 0);
+		atomic_fetch_add_explicit(&w->stat_wake_futex, 1,
+					  memory_order_relaxed);
+	}
+}
+
+static void worker_eventfd_wake(xr_worker_t *w)
 {
 	uint32_t expect = 0;
 
@@ -129,31 +185,65 @@ static void worker_wake(xr_worker_t *w)
 	}
 }
 
-/* deliver 在 unpark 调用线程、持 parker pub 时执行(V0 形态) */
-static void task_deliver(xr_parker_t *p, uint64_t payload, void *ctx)
+static void worker_wake(xr_worker_t *w)
 {
-	xr_waker_t *wk = ctx;
-	xr_worker_t *w = wk->worker;
 	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
-	int pushed = 0;
 
-	(void)p;
-	(void)payload;
-
-	pthread_mutex_lock(&w->lock);
+	if ((flags & XR_WORKER_FUTEX) != 0)
 	{
-		xr_task_t *t = reg_find_locked(w, wk->id);
+		worker_futex_wake(w);
+		return;
+	}
+	worker_eventfd_wake(w);
+}
+
+/* deliver 唯一漏斗:解析/直接指针 + 入队 + transport(调用方持 pub)。
+ * dt!=NULL = V4a 直接 waker;否则经 wk 弱句柄解析(miss 即丢)。
+ * 非 MPSC:find+push 必须同锁原子(防 DONE 摘除后重新入队);
+ * MPSC:解析(锁内)与入队(无锁环)分离,由"至多一个 ready 条目"不变式保证。 */
+static void deliver_impl(xr_worker_t *w, const xr_waker_t *wk, xr_task_t *dt)
+{
+	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
+	xr_task_t *t = NULL;
+
+	if ((flags & XR_WORKER_MPSC) != 0)
+	{
+		if (dt != NULL)
+		{
+			t = dt;
+		}
+		else if (wk != NULL)
+		{
+			pthread_mutex_lock(&w->lock);
+			t = reg_find_locked(w, wk->id);
+			pthread_mutex_unlock(&w->lock);
+		}
+		if (t == NULL)
+		{
+			return;
+		}
+		worker_enqueue(w, t);
+	}
+	else
+	{
+		pthread_mutex_lock(&w->lock);
+		if (dt != NULL)
+		{
+			t = dt;
+		}
+		else if (wk != NULL)
+		{
+			t = reg_find_locked(w, wk->id);
+		}
 		if (t != NULL)
 		{
 			push_ready_locked(w, t);
-			pushed = 1;
 		}
-	}
-	pthread_mutex_unlock(&w->lock);
-
-	if (pushed == 0)
-	{
-		return;
+		pthread_mutex_unlock(&w->lock);
+		if (t == NULL)
+		{
+			return;
+		}
 	}
 	atomic_fetch_add_explicit(&w->stat_delivers, 1, memory_order_relaxed);
 
@@ -164,25 +254,50 @@ static void task_deliver(xr_parker_t *p, uint64_t payload, void *ctx)
 					  memory_order_relaxed);
 		return;
 	}
-	/* V2:sleeping 门控——worker 未挂起时只入队,由 drain 兜底 */
+	/* V2:sleeping 门控——依赖 mutex 队列对"入队/复核"的串行化;
+	 * MPSC 无锁队列破坏该协议,FUTEX 有自带单字门控(sleeping 不再维护),
+	 * 故二者下 GATE 自动失效(见 xr_worker.h 契约)。 */
 	if ((flags & XR_WORKER_GATE) != 0 &&
+	    (flags & (XR_WORKER_MPSC | XR_WORKER_FUTEX)) == 0 &&
 	    atomic_load_explicit(&w->sleeping, memory_order_acquire) == 0)
 	{
 		atomic_fetch_add_explicit(&w->stat_wake_gated, 1,
 					  memory_order_relaxed);
 		return;
 	}
+	/* V5:futex transport(单字协议)——0→1 才发 futex_wake;worker awake 时
+	 * (fut_word=1)零 syscall。不依赖队列串行化,MPSC|FUTEX 亦正确。 */
+	if ((flags & XR_WORKER_FUTEX) != 0)
+	{
+		worker_futex_wake(w);
+		return;
+	}
 	worker_wake(w);
+}
+
+/* V0 形态:经弱句柄 registry 解析 */
+static void task_deliver(xr_parker_t *p, uint64_t payload, void *ctx)
+{
+	xr_waker_t *wk = ctx;
+
+	(void)p;
+	(void)payload;
+	deliver_impl(wk->worker, wk, NULL);
+}
+
+/* V4a:ctx 直接为 task 指针,零查找 */
+static void task_deliver_direct(xr_parker_t *p, uint64_t payload, void *ctx)
+{
+	xr_task_t *t = ctx;
+
+	(void)p;
+	(void)payload;
+	deliver_impl(t->owner, NULL, t);
 }
 
 static xr_task_t *worker_pop(xr_worker_t *w)
 {
-	xr_task_t *t;
-
-	pthread_mutex_lock(&w->lock);
-	t = pop_ready_locked(w);
-	pthread_mutex_unlock(&w->lock);
-	return t;
+	return worker_dequeue(w);
 }
 
 static void worker_run_task(xr_worker_t *w, xr_task_t *t)
@@ -193,9 +308,7 @@ static void worker_run_task(xr_worker_t *w, xr_task_t *t)
 	rc = t->fn(t);
 	if (rc == XR_TASK_RUN_AGAIN)
 	{
-		pthread_mutex_lock(&w->lock);
-		push_ready_locked(w, t);
-		pthread_mutex_unlock(&w->lock);
+		worker_enqueue(w, t);
 	}
 	else if (rc == XR_TASK_DONE)
 	{
@@ -234,8 +347,38 @@ static void *worker_main(void *arg)
 			break;
 		}
 
+		/* V5 单字 futex 协议(与 eventfd/sleeping 协议并列):
+		 * 0=声明睡眠(仅此刻生产者会 futex_wake),1=awake/有唤醒在途。
+		 * 先置 0 再复核队列,不依赖 mutex 串行化。 */
+		if ((atomic_load_explicit(&w->flags, memory_order_relaxed) &
+		     XR_WORKER_FUTEX) != 0)
+		{
+			atomic_store_explicit(&w->fut_word, 0,
+					      memory_order_release);
+			t = worker_pop(w);
+			if (t != NULL)
+			{
+				atomic_store_explicit(&w->fut_word, 1,
+						      memory_order_release);
+				worker_run_task(w, t);
+				continue;
+			}
+			{
+				struct timespec ts;
+
+				ts.tv_sec = 0;
+				ts.tv_nsec = 100000000; /* 100ms:仅为观察 stop */
+				(void)syscall(SYS_futex, &w->fut_word,
+					      FUTEX_WAIT_PRIVATE, 0, &ts, NULL,
+					      0);
+				atomic_store_explicit(&w->fut_word, 1,
+						      memory_order_release);
+			}
+			continue;
+		}
+
 		/* V2:先置 sleeping 再复核队列,关闭
-		 * "pop 空 → 生产者入队且看到 sleeping=0 → 丢唤醒" 窗口 */
+		 * "pop 空 → 生产者入队且看到 sleeping=0 → 丢唤醒" 窗口。 */
 		atomic_store_explicit(&w->sleeping, 1, memory_order_release);
 		t = worker_pop(w);
 		if (t != NULL)
@@ -279,6 +422,8 @@ xr_worker_t *xr_worker_create(int cpu)
 	w->event_fd = -1;
 	w->cpu = cpu;
 	w->next_id = 1;
+	/* V5:初始 awake(=1),避免首次唤醒的无谓 futex_wake */
+	atomic_store_explicit(&w->fut_word, 1, memory_order_relaxed);
 
 	if (pthread_mutex_init(&w->lock, NULL) != 0)
 	{
@@ -306,6 +451,11 @@ xr_worker_t *xr_worker_create(int cpu)
 			goto fail;
 		}
 	}
+	w->mpsc = xr_mpsc_create(4096);
+	if (w->mpsc == NULL)
+	{
+		goto fail;
+	}
 	if (pthread_create(&w->thread, NULL, worker_main, w) != 0)
 	{
 		goto fail;
@@ -315,6 +465,7 @@ xr_worker_t *xr_worker_create(int cpu)
 
 fail:
 	XR_LOGE("worker create failed: %s", strerror(errno));
+	xr_mpsc_destroy(w->mpsc);
 	if (w->event_fd >= 0)
 	{
 		close(w->event_fd);
@@ -340,6 +491,7 @@ void xr_worker_destroy(xr_worker_t *w)
 	{
 		pthread_join(w->thread, NULL);
 	}
+	xr_mpsc_destroy(w->mpsc);
 	close(w->event_fd);
 	close(w->epoll_fd);
 	pthread_mutex_destroy(&w->lock);
@@ -349,6 +501,14 @@ void xr_worker_destroy(xr_worker_t *w)
 void xr_worker_set_flags(xr_worker_t *w, unsigned flags)
 {
 	atomic_store_explicit(&w->flags, flags, memory_order_relaxed);
+	if ((flags & XR_WORKER_FUTEX) != 0)
+	{
+		/* 配置期(一次性):worker 线程可能已按旧 flags 睡在 epoll_wait,
+		 * 而新 transport 走 futex_wake——双写覆盖两种睡眠原语,使其
+		 * 回循环重读 flags。热路径无此开销。 */
+		worker_eventfd_wake(w);
+		worker_futex_wake(w);
+	}
 }
 
 void xr_worker_stats(xr_worker_t *w, xr_worker_stats_t *out)
@@ -361,6 +521,8 @@ void xr_worker_stats(xr_worker_t *w, xr_worker_stats_t *out)
 	out->wake_direct = atomic_load_explicit(&w->stat_wake_direct,
 						memory_order_relaxed);
 	out->wake_gated = atomic_load_explicit(&w->stat_wake_gated,
+					       memory_order_relaxed);
+	out->wake_futex = atomic_load_explicit(&w->stat_wake_futex,
 					       memory_order_relaxed);
 }
 
@@ -380,15 +542,26 @@ xr_parker_t *xr_task_parker(xr_task_t *t)
 
 void xr_task_spawn(xr_worker_t *w, xr_task_t *t)
 {
+	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
+	int waker_direct = (flags & XR_WORKER_WAKER_DIRECT) != 0;
+
 	pthread_mutex_lock(&w->lock);
 	t->owner = w;
 	t->id = w->next_id;
 	w->next_id++;
 	t->waker.worker = w;
 	t->waker.id = t->id;
-	xr_parker_init(&t->parker, task_deliver, &t->waker);
-	reg_insert_locked(w, t);
-	push_ready_locked(w, t);
+	if (waker_direct)
+	{
+		/* V4a:ctx=task 指针,跳过 registry(生命期前置见 xr_task.h) */
+		xr_parker_init(&t->parker, task_deliver_direct, t);
+	}
+	else
+	{
+		xr_parker_init(&t->parker, task_deliver, &t->waker);
+		reg_insert_locked(w, t);
+	}
 	pthread_mutex_unlock(&w->lock);
+	worker_enqueue(w, t); /* L2:注册先于入队(MPSC 模式锁外入环) */
 	worker_wake(w);
 }
