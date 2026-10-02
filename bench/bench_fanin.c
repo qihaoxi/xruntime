@@ -111,6 +111,7 @@ int main(int argc, char **argv)
 	int wkcpu = 1;
 	int prodcpu = 2;
 	int wait_mode = 0;
+	unsigned flags = 0;
 	fan_t *c;
 	xr_worker_t *w;
 	pthread_t *ths;
@@ -141,6 +142,10 @@ int main(int argc, char **argv)
 		{
 			wait_mode = 1;
 		}
+		else if (strcmp(argv[i], "--flags") == 0 && i + 1 < argc)
+		{
+			flags = (unsigned)strtoul(argv[++i], NULL, 0);
+		}
 	}
 
 	xr_time_init();
@@ -158,6 +163,7 @@ int main(int argc, char **argv)
 		XR_LOGE("worker create failed");
 		return 1;
 	}
+	xr_worker_set_flags(w, flags);
 	xr_task_init(&c->task, fan_step, c);
 	xr_task_spawn(w, &c->task);
 	while (atomic_load_explicit(&c->ready, memory_order_acquire) == 0)
@@ -205,9 +211,9 @@ int main(int argc, char **argv)
 		uint64_t parks = atomic_load(&c->parks);
 
 		printf("bench_fanin: producers=%d ops/thread=%d total=%" PRIu64
-		       " wkcpu=%d prodcpu=%d..%d mode=%s\n",
+		       " wkcpu=%d prodcpu=%d..%d mode=%s flags=%u\n",
 		       producers, ops, total, wkcpu, prodcpu, prodcpu + producers - 1,
-		       wait_mode != 0 ? "wait" : "unpaced");
+		       wait_mode != 0 ? "wait" : "unpaced", flags);
 		printf("  throughput: %.2f Mops/s (elapsed=%.1f ms)\n",
 		       (double)total / elapsed_s / 1e6, elapsed_s * 1e3);
 		printf("  unpark: deliver=%" PRIu64 " (%.1f%%) stored=%" PRIu64
@@ -216,8 +222,10 @@ int main(int argc, char **argv)
 		       100.0 * (double)stored / (double)total, merged,
 		       100.0 * (double)merged / (double)total);
 		printf("  worker: parks=%" PRIu64 " runs=%" PRIu64
-		       " delivers=%" PRIu64 " wake_writes=%" PRIu64 "\n",
-		       parks, stats.runs, stats.delivers, stats.wake_writes);
+		       " delivers=%" PRIu64 " wake_writes=%" PRIu64
+		       " wake_direct=%" PRIu64 " wake_gated=%" PRIu64 "\n",
+		       parks, stats.runs, stats.delivers, stats.wake_writes,
+		       stats.wake_direct, stats.wake_gated);
 		printf("  tax: eventfd/unpark=%.5f runs/unpark=%.5f parks/deliver=%.3f\n",
 		       (double)stats.wake_writes / (double)total,
 		       (double)stats.runs / (double)total,

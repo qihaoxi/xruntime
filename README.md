@@ -16,7 +16,7 @@ A/B,为"是否值得另立高上限运行时 / 能否回灌 PEL"提供同窗测�
 |---|---|---|
 | S1 | 骨架 + parker 三态最小实现 | ✅ 2026-10-02 |
 | S2 | V0 基线(worker/registry/mutex 队列)+ B1/B2 | ✅ 2026-10-02 |
-| S3 | V1 同线程直投 / V2 门控 wake | ⬜ |
+| S3 | V1 同线程直投 / V2 门控 wake | ✅ 2026-10-02(未超噪声,默认关) |
 | S4 | V3 lock-free 队列 / V4 waker lifetime | ⬜ |
 | S5 | V5 transport 备选(futex/io_uring/批量) | ⬜ |
 | S6 | 高并发合成 echo + 总报告/决策建议 | ⬜ |
@@ -71,11 +71,14 @@ scripts/run-tests.sh debug        # ctest,失败样例见日志
 scripts/build.sh release
 scripts/run-bench.sh release bench_env --iters 200000 [--cpu N]
 
-# B1 唤醒延迟分解(跨线程,串行)
+# B1 唤醒延迟分解(跨线程,串行;--same-thread=同 worker 双 task 互踢)
 scripts/run-bench.sh release bench_roundtrip --ops 200000 --wkcpu 1 --prodcpu 2
+scripts/run-bench.sh release bench_roundtrip --ops 200000 --same-thread
 
 # B2 每请求唤醒税(fan-in;--wait=请求-响应口径,复刻 PEL D5)
 scripts/run-bench.sh release bench_fanin --producers 8 --ops 200000 --wkcpu 1 --prodcpu 2 --wait
+
+# 变体开关(A/B):--flags 0=V0 · 1=V1 同线程直投 · 2=V2 parked 门控 · 3=both
 ```
 
 测量纪律(沿用 PEL):先跑 `scripts/env-check.sh`(governor=performance、无遗留

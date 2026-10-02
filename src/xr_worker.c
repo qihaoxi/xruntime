@@ -14,6 +14,8 @@
 
 #define XR_REG_BUCKETS 1024u
 
+static _Thread_local xr_worker_t *tls_worker; /* V1:识别同线程 deliver */
+
 struct xr_worker
 {
 	int epoll_fd;
@@ -26,11 +28,15 @@ struct xr_worker
 	xr_task_t *ready_tail;
 	xr_task_t *reg[XR_REG_BUCKETS];
 	uint64_t next_id;
+	_Atomic unsigned flags;        /* XR_WORKER_DIRECT / XR_WORKER_GATE */
 	_Atomic uint32_t wake_pending; /* libuv async-pending 式合并 */
+	_Atomic uint32_t sleeping;     /* V2:worker 正在(或即将)epoll_wait */
 	_Atomic uint32_t stop;
 	_Atomic uint64_t stat_wake_writes;
 	_Atomic uint64_t stat_delivers;
 	_Atomic uint64_t stat_runs;
+	_Atomic uint64_t stat_wake_direct;
+	_Atomic uint64_t stat_wake_gated;
 };
 
 /* ---------- ready 队列(调用方持 lock) ---------- */
@@ -128,6 +134,7 @@ static void task_deliver(xr_parker_t *p, uint64_t payload, void *ctx)
 {
 	xr_waker_t *wk = ctx;
 	xr_worker_t *w = wk->worker;
+	unsigned flags = atomic_load_explicit(&w->flags, memory_order_relaxed);
 	int pushed = 0;
 
 	(void)p;
@@ -144,11 +151,57 @@ static void task_deliver(xr_parker_t *p, uint64_t payload, void *ctx)
 	}
 	pthread_mutex_unlock(&w->lock);
 
-	if (pushed != 0)
+	if (pushed == 0)
 	{
-		atomic_fetch_add_explicit(&w->stat_delivers, 1,
+		return;
+	}
+	atomic_fetch_add_explicit(&w->stat_delivers, 1, memory_order_relaxed);
+
+	/* V1:同线程安全点直投——worker 处理完当前 step 会再 drain 队列 */
+	if ((flags & XR_WORKER_DIRECT) != 0 && tls_worker == w)
+	{
+		atomic_fetch_add_explicit(&w->stat_wake_direct, 1,
 					  memory_order_relaxed);
-		worker_wake(w);
+		return;
+	}
+	/* V2:sleeping 门控——worker 未挂起时只入队,由 drain 兜底 */
+	if ((flags & XR_WORKER_GATE) != 0 &&
+	    atomic_load_explicit(&w->sleeping, memory_order_acquire) == 0)
+	{
+		atomic_fetch_add_explicit(&w->stat_wake_gated, 1,
+					  memory_order_relaxed);
+		return;
+	}
+	worker_wake(w);
+}
+
+static xr_task_t *worker_pop(xr_worker_t *w)
+{
+	xr_task_t *t;
+
+	pthread_mutex_lock(&w->lock);
+	t = pop_ready_locked(w);
+	pthread_mutex_unlock(&w->lock);
+	return t;
+}
+
+static void worker_run_task(xr_worker_t *w, xr_task_t *t)
+{
+	int rc;
+
+	atomic_fetch_add_explicit(&w->stat_runs, 1, memory_order_relaxed);
+	rc = t->fn(t);
+	if (rc == XR_TASK_RUN_AGAIN)
+	{
+		pthread_mutex_lock(&w->lock);
+		push_ready_locked(w, t);
+		pthread_mutex_unlock(&w->lock);
+	}
+	else if (rc == XR_TASK_DONE)
+	{
+		pthread_mutex_lock(&w->lock);
+		reg_remove_locked(w, t);
+		pthread_mutex_unlock(&w->lock);
 	}
 }
 
@@ -156,6 +209,7 @@ static void *worker_main(void *arg)
 {
 	xr_worker_t *w = arg;
 
+	tls_worker = w;
 	if (w->cpu >= 0)
 	{
 		int rc = xr_pin_to_cpu(w->cpu);
@@ -167,30 +221,11 @@ static void *worker_main(void *arg)
 
 	for (;;)
 	{
-		xr_task_t *t;
-		int rc;
-
-		pthread_mutex_lock(&w->lock);
-		t = pop_ready_locked(w);
-		pthread_mutex_unlock(&w->lock);
+		xr_task_t *t = worker_pop(w);
 
 		if (t != NULL)
 		{
-			atomic_fetch_add_explicit(&w->stat_runs, 1,
-						  memory_order_relaxed);
-			rc = t->fn(t);
-			if (rc == XR_TASK_RUN_AGAIN)
-			{
-				pthread_mutex_lock(&w->lock);
-				push_ready_locked(w, t);
-				pthread_mutex_unlock(&w->lock);
-			}
-			else if (rc == XR_TASK_DONE)
-			{
-				pthread_mutex_lock(&w->lock);
-				reg_remove_locked(w, t);
-				pthread_mutex_unlock(&w->lock);
-			}
+			worker_run_task(w, t);
 			continue;
 		}
 
@@ -199,10 +234,24 @@ static void *worker_main(void *arg)
 			break;
 		}
 
+		/* V2:先置 sleeping 再复核队列,关闭
+		 * "pop 空 → 生产者入队且看到 sleeping=0 → 丢唤醒" 窗口 */
+		atomic_store_explicit(&w->sleeping, 1, memory_order_release);
+		t = worker_pop(w);
+		if (t != NULL)
+		{
+			atomic_store_explicit(&w->sleeping, 0,
+					      memory_order_release);
+			worker_run_task(w, t);
+			continue;
+		}
+
 		{
 			struct epoll_event ev;
 			int n = epoll_wait(w->epoll_fd, &ev, 1, -1);
 
+			atomic_store_explicit(&w->sleeping, 0,
+					      memory_order_release);
 			if (n > 0)
 			{
 				uint64_t v;
@@ -297,6 +346,11 @@ void xr_worker_destroy(xr_worker_t *w)
 	free(w);
 }
 
+void xr_worker_set_flags(xr_worker_t *w, unsigned flags)
+{
+	atomic_store_explicit(&w->flags, flags, memory_order_relaxed);
+}
+
 void xr_worker_stats(xr_worker_t *w, xr_worker_stats_t *out)
 {
 	out->wake_writes = atomic_load_explicit(&w->stat_wake_writes,
@@ -304,6 +358,10 @@ void xr_worker_stats(xr_worker_t *w, xr_worker_stats_t *out)
 	out->delivers = atomic_load_explicit(&w->stat_delivers,
 					     memory_order_relaxed);
 	out->runs = atomic_load_explicit(&w->stat_runs, memory_order_relaxed);
+	out->wake_direct = atomic_load_explicit(&w->stat_wake_direct,
+						memory_order_relaxed);
+	out->wake_gated = atomic_load_explicit(&w->stat_wake_gated,
+					       memory_order_relaxed);
 }
 
 /* ---------- task ---------- */

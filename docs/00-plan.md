@@ -83,7 +83,7 @@ governor=performance、warmup 1s、measure ≥3s、3 轮 median、单变量同�
 |---|---|---|---|
 | S1 | 骨架:CMake/目录/日志规范/绑核与 sanitizer 脚本(+ parker 三态最小实现前移) | 构建可跑 | ✅ 2026-10-02 |
 | S2 | V0 基线 + B1/B2,复刻 PEL 唤醒形态 | 基线数字 | ✅ 2026-10-02 |
-| S3 | V1/V2(H1/H4),目标:同线程链零 transport | A/B 报告 | ⬜ |
+| S3 | V1/V2(H1/H4),目标:同线程链零 transport | A/B 报告 | ✅ 2026-10-02 |
 | S4 | V3/V4(H2/H3/H5),队列与 lifetime | A/B 报告 | ⬜ |
 | S5 | V5 transport 备选(H6) | A/B 报告 | ⬜ |
 | S6 | B3 高并发合成 + 总报告:回灌 PEL / 另立运行时 判据 | 决策建议 | ⬜ |
@@ -109,6 +109,24 @@ S2 验证(2026-10-02,本机 16 核,release;注意:governor=powersave 未切换,
   无节流 unpaced:M=1 即 99.7% merged(eventfd/op 0.002)=latch 合并上限形态。
 - 结论:V1/V2 的对照基线就位;"链上单对"成本已与 PEL 每对接近,后续变体
   净收益可直接在同一 B1/B2 口径上判定。
+
+S3 验证(2026-10-02,本机 16 核,release;governor=powersave):
+- 变体接入:`XR_WORKER_DIRECT`(V1)/`XR_WORKER_GATE`(V2)运行期 flags
+  (默认 0=V0);test_worker 覆盖 flags 0/1/2/3 ×(跨线程 1 万 + 同线程
+  10 万 ping-pong),五面全绿。
+- B1 same-thread(20 万 hop,3 轮 median-p50):RTT 50~70ns;flags 0/1/2/3
+  全在噪声内;V0 wake_writes=2/40 万 unpark(pending 合并已把 eventfd 压到 0)。
+- B1 cross-thread:flags 0/2/3 均为 producer_side 1.29µs + consumer_wake
+  1.78µs = RTT 3.08µs;gate 仅省 20~30/20 万次写,无延迟差。
+- B2 wait(D5 口径)flags0 vs 2:eventfd/unpark M=1 0.987~0.991 vs
+  0.968~0.983;M=4 0.249 vs 0.249;M=8 0.1245 vs 0.1245;吞吐同噪声。
+- B2 unpaced:M=8 0.0191 vs 0.018~0.019,吞吐 11.7~12.2 Mops/s 同噪声。
+- 判定:V1/V2 均未超噪声,**不保留为默认、不迁移 PEL**(flags 默认 0,
+  仅留作 S4 对照开关);H1/H4 在本模型下证伪——同线程 transport 已被
+  pending 合并消掉(40 万 op 仅 2 写),跨线程瓶颈是 cache-line 传输 +
+  epoll 唤醒(~3µs/对),不是 eventfd 写/门控能省的。同线程 60ns vs
+  跨线程 3µs 的 50× 差说明直投收益只在"把工作搬回同线程"时才存在
+  (呼应 PEL D8 同线程内联 drain 回退)。
 
 ## 5. 风险与边界
 
