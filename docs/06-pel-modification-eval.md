@@ -246,6 +246,23 @@ per-core成本 = loop调度 + IO/syscall + park/wake + 业务
 - **对 PEL**：8MB 默认栈应改为"上限/显式申请"（默认 64–128KB）；池化+
   arena 消掉创建/VMA 墙；安全与动态增长二选一，最终指向 stackless。
 
+**直答三问（评审用）**
+
+1. **省多少 VMA？** 从 2 个/fibre → **~0 个/fibre**：30K 时 60023→26/28；
+   100K 时 mmap+guard **建不出来**（65530 墙，~3.3 万即失败），
+   ARENA/ARENA_GUARD 只要 26/28 个。ARENA_GUARD 与纯 ARENA 一样省
+   （UFFD-WP 是 PTE 级写保护，不拆 VMA）。
+2. **越界保护有吗？** ARENA **没有**（静默踩相邻栈）；ARENA_GUARD **有**
+   （实测 faults=1），代价 = 创建 ~10µs（WP 对未落页无效，必须
+   touch+ioctl）+ 每 fibre 1 页 RSS；mmap+guard 有（SIGSEGV）但 2 VMA/fibre
+   撞墙。
+3. **需要特权吗？** ARENA **不需要**；ARENA_GUARD **需要**
+   `vm.unprivileged_userfaultfd=1` 或 CAP_SYS_PTRACE（sudo/root）；默认
+   sysctl=0 时自动降级为无 guard ARENA（WARN）。
+- **三者不可兼得**：快（340ns）+ 省 VMA（~28）靠 ARENA；保护只有 guard
+  有；UFFD guard 要特权且慢。→ **release=ARENA、debug/CI=ARENA_GUARD，
+  100K+ 且必须安全 → stackless**。
+
 ---
 
 ## 1. 问题定义与目标

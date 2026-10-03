@@ -337,6 +337,12 @@ per-core ≈ 0.8–0.9× uv（doc165/166）；无锁语义红利随核数放大�
 - **结论**：创建 51× 与 VMA 墙可用 arena 消掉（17–24×）；溢出安全要另付
   （UFFD-WP ~10µs 或 stackless）；建议 release=arena、debug/CI=guard，或
   100K+ 安全要求下直接 stackless。
+- **三问直答**：① VMA：2 个/fibre → **~0**（30K 时 60023→26/28；100K 时
+  mmap+guard 建不出来，arena/guard 仅 26/28，无需改 `max_map_count`）；
+  ② 越界保护：ARENA **无**、ARENA_GUARD **有**（实测 faults=1，代价
+  ~10µs/个 + 1 页 RSS）、mmap+guard 有但撞 VMA 墙；③ 特权：ARENA **无**、
+  ARENA_GUARD **需** UFFD 权限（`unprivileged_userfaultfd=1` 或
+  CAP_SYS_PTRACE，否则自动降级）。**快/省 VMA/保护三者不可兼得**。
 
 ## 4. 执行摘要与证据位置
 
