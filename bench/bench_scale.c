@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -728,6 +729,27 @@ int main(int argc, char **argv)
 			       "\n",
 			       (double)xr_tsc_to_ns(dsp_ns) / (double)dsp_n,
 			       (double)xr_tsc_to_ns(dsp_max), dsp_n);
+		}
+		{
+			struct rusage ru;
+
+			if (getrusage(RUSAGE_SELF, &ru) == 0)
+			{
+				double cpu = (double)ru.ru_utime.tv_sec +
+					     (double)ru.ru_utime.tv_usec / 1e6 +
+					     (double)ru.ru_stime.tv_sec +
+					     (double)ru.ru_stime.tv_usec / 1e6;
+
+				printf("  cpu: user=%.2fs sys=%.2fs total=%.2fs"
+				       " cpu/req=%.0fns nvcsw=%ld nivcsw=%ld\n",
+				       (double)ru.ru_utime.tv_sec +
+					       (double)ru.ru_utime.tv_usec / 1e6,
+				       (double)ru.ru_stime.tv_sec +
+					       (double)ru.ru_stime.tv_usec / 1e6,
+				       cpu,
+				       reqs > 0 ? cpu * 1e9 / (double)reqs : 0.0,
+				       ru.ru_nvcsw, ru.ru_nivcsw);
+			}
 		}
 	}
 	for (int i = 0; i < s.n; i++)

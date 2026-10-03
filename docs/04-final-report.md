@@ -278,6 +278,45 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
   最坏上界，可分片即退化为 per-worker 状态（即该模型本身）。
   理论模型与 U13b–d 计划见 `docs/06-pel-modification-eval.md` §0.7。
 
+### 3.12 U13 收束：跨 loop 消息 / 16 核饱和 / D8 上界（2026-10-04）
+
+**U13b 跨 loop 消息**（无共享模型唯一跨核原语）：
+
+| 口径 | eventfd | futex | Δ |
+|---|---|---|---|
+| B1 单向唤醒 p50 | 2.92µs | **0.36µs** | −88% |
+| echo 1:1 往返（2 handoff） | 5.42µs | 4.61µs | −15%，rps +33% |
+| fanin 吞吐 M=1/4/8 | 0.32/1.29/3.97 Mops/s | **2.50/6.29/6.03** | +681%/+388%/+52% |
+
+消息 = 唤醒原语 + 显式入队，不进入业务的无锁状态；futex 把单向压到
+0.36µs、吞吐 2–6M msg/s。
+
+**U13c 16 核饱和**（bench_scale + getrusage；payload 256、512 连接、8 客户端线程）：
+
+| K | rps | server CPU（核） | cpu/req | nvcsw |
+|---|---|---|---|---|
+| 4 | 669K | 3.9 | 6074ns | 0.5K |
+| **8** | **1110K** | 7.5 | 7031ns | 22K |
+| 12 | 995K | 7.6 | 7778ns | 899K |
+| 16 | 922K | 7.1 | 8139ns | 1287K |
+
+峰值 K=8；K≥12 回落：客户端 8 线程 + 内核 softirq 与 worker 争核（nvcsw
+爆炸），且 **sys 占 server CPU ~90%**（loopback TCP/系统调用主导），
+cpu/req 随 K 从 6.1→8.1µs。**单机 loopback 的共享资源上限先于核数到达**；
+提高上界需少 syscall（io_uring/批量）或独立客户端/多队列 NIC。
+
+**U13d D8 self-wake 上界**（代理测量）：同线程自我唤醒（eventfd 写→epoll
+返回→drain）平均 **757ns**；PEL c=1 self-wake 1.21/req → **≈0.92µs/req
+≈ 13µs 的 7%、PEL-vs-uv 2.1µs 缺口的 ~44%**；c≥16 合并后忽略。D8 理论
+上界 ≈0.9µs/req（c=1），实际受帧寿命约束打折，仅作上界参考。
+
+**模型上界结论**：`上界 = min(N核 × per-core, 共享资源)`。PEL 形态下
+per-core ≈ 0.8–0.9× uv（doc165/166）；无锁语义红利随核数放大（U13a K=8
+4.3× atomic）；accept 分发近线性到共享资源截断（U12/U13c：本机 loopback
+~8 loop、1.1M rps，syscall/softirq 主导）；跨 loop 消息 0.36–2.9µs/条、
+2–6M/s；D8 上界 ~0.9µs/req（c=1）。**该模型的理论上界不是"每核 1.0× uv"，
+而是"每核接近 uv + 无锁红利 + 近线性扩展，直到内核/客户端截断"。**
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -294,6 +333,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S11 | fibre 迁移边界:跨线程 resume 57ns vs 同线程 15ns;栈保持、TLS/句柄随线程 | `bench-logs/bench_l0-20261003-153152.log`、`ctx_migrate` |
 | S12 | accept 分发:reuseport/dispatch K=1→4 近线性(3.8×)、零迁移;K=8 866K rps | `bench-logs/bench_scale-20261004-0054*` |
 | S13 | 锁-free 语义 per-core:K=8 local 4.8× vs atomic 1.1×(平掉);mutex 单锁上限 | `bench-logs/bench_scale-20261004-0117*` |
+| S14 | U13b-d:跨 loop 消息 0.36–2.9µs/2–6M msg/s;16 核峰值 K=8(1.1M,sys 90%);D8 上界 ~0.9µs/req | `bench-logs/bench_{l0,echo,fanin,scale}-20261004-0126*` |
 
 ## 5. 风险与边界
 

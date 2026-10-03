@@ -333,6 +333,37 @@ PEL loadgen echo 1KB,256 连接,每请求 1024 次 mix 业务):
   shared 版本是"不可避免共享"的最坏上界(可分片即退化为 per-worker 状态)。
 - 日志:`bench-logs/bench_scale-20261004-0117*`。
 
+S14 验证(U13b-d 跨 loop 消息/16 核饱和/D8 上界;2026-10-04,release):
+- **U13b 跨 loop 消息**(无共享模型唯一跨核原语):
+  - 单向唤醒(B1 cross p50):eventfd 2.92µs vs futex **0.36µs**(-88%);
+  - 请求-应答往返(echo 1:1 park,2 次 handoff):eventfd 5.42µs vs futex
+    4.61µs(-15%),rps +33%;
+  - 消息吞吐(fanin wait):M=1 0.32→**2.50 Mops/s**(+681%)、M=4 1.29→
+    **6.29**、M=8 3.97→6.03;
+  - 结论:跨 loop 消息 = 唤醒原语 + 显式入队;futex 把单向压到 0.36µs、
+    吞吐 2~6M msg/s;消息不进入业务的无锁状态。
+- **U13c 16 核饱和**(bench_scale + getrusage;payload 256、512 连接、
+  8 客户端线程):
+  - K=4 669K rps / server CPU 3.9 核 / cpu/req 6074ns;
+  - K=8 **1110K** / 7.5 核 / 7031ns;
+  - K=12 995K / 7.6 核 / 7778ns(nvcsw 899K);
+  - K=16 922K / 7.1 核 / 8139ns(nvcsw 1287K);
+  - 峰值 K=8;K≥12 回落(客户端+softirq 争核,nvcsw 爆炸);**sys 占
+    server CPU ~90%**(loopback TCP/系统调用主导);cpu/req 6.1→8.1µs;
+  - 结论:单机 loopback 的"共享资源上限"先于核数到达——内核网络栈/系统
+    调用+客户端在 ~8 loop 截断;模型内近线性到 K=8;提高上界需少 syscall
+    (io_uring/批量)或独立客户端/多队列 NIC。
+- **U13d D8 self-wake 上界**(代理测量):
+  - 同线程自我唤醒(eventfd 写→epoll 返回→drain)平均 **757ns**;
+  - PEL c=1 self-wake 1.21/req → **≈0.92µs/req ≈ 13µs 的 7%、
+    PEL-vs-uv 2.1µs 缺口的 ~44%**;c≥16 合并到 0.076/req 后可忽略;
+  - 结论:D8(同 tick drain)在 c=1 的理论上界 ≈0.9µs/req,实际受帧寿命
+    约束打折,仅作上界参考。
+- 日志:`bench-logs/bench_l0-20261004-012612`、
+  `bench_echo-20261004-012615/012616`、
+  `bench_fanin-20261004-012617~012625`、
+  `bench_scale-20261004-012626~012651`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差

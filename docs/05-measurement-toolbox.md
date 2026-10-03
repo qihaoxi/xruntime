@@ -208,6 +208,11 @@ scripts/run-bench.sh release bench_scale --workers 8 --dist reuseport --port 231
 # L0 迁移边界与标定
 scripts/run-bench.sh release bench_l0 --mode migrate --ops 200000
 scripts/run-bench.sh release bench_l0 --mode ring --l0 fibre --fibres 100000 --ops 2000000 --stack 16384
+# D8 self-wake 代理:同线程 eventfd 写→epoll 返回→drain
+scripts/run-bench.sh release bench_l0 --mode wake --ops 2000000
+# U13c 饱和点:bench_scale 内建 getrusage(server CPU/req、nvcsw)
+scripts/run-bench.sh release bench_scale --workers 8 --dist reuseport --port 23100 \
+    --duration 5 --conns 512 --threads 8 --payload 256 --loadgen $LG
 # 日志: bench-logs/ test-logs/(-latest.log 软链)
 ```
 

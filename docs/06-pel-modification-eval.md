@@ -195,23 +195,32 @@ per-core成本 = loop调度 + IO/syscall + park/wake + 业务
   **零迁移**；
 - U13a（04 §3.11）：同一服务 K=8 下 local **4.8×** vs atomic **1.1×**
   （平掉）、mutex 单锁上限 ~500K → 无锁语义的 per-core 收益随核数放大；
+- U13b（04 §3.12）：跨 loop 消息（唯一跨核原语）单向 0.36µs（futex）/
+  2.92µs（eventfd），吞吐 2–6M msg/s；
+- U13c（04 §3.12）：本机 loopback 16 核峰值在 K=8（1.11M rps），K≥12 回落
+  （客户端+softirq 争核，sys 占 server CPU ~90%）→ **共享资源先于核数
+  截断**；
+- U13d（04 §3.12）：D8 self-wake 代理 757ns × 1.21/req ≈ 0.92µs/req
+  ≈ c=1 总成本的 7%、PEL-vs-uv 缺口的 ~44%（上界）；
 - doc165/166：PEL 单 loop 0.64–0.82× uv；用户态 16.95% vs 2.56%。
 
-**推论**
+**推论（U13 收束）**
 
-- 上界 ≈（0.8–0.9× uv per-core）× N 核，再被共享资源截断；
+- `上界 = min(N核 × per-core, 共享资源)`：per-core ≈ 0.8–0.9× uv，
+  无锁红利随核数放大，分发近线性直到内核/客户端截断；
+- 本机 loopback 的截断点在 ~8 loop / 1.1M rps（syscall/softirq 主导）；
+  真实部署的上界取决于 NIC 多队列/独立客户端/少 syscall（io_uring）；
 - 对 rust 的 0.37–0.69× 主要是单 worker vs 多线程；分发补齐后，上界由
-  per-core 效率决定；
+  per-core 效率与共享资源决定；
 - 该模型的目标不是"每核 1.0× uv"，而是"每核接近 uv + 无锁业务红利 +
   近线性扩展"。
 
-**U13 计划（探索中）**
+**U13 计划（已完成）**
 
 - **U13a** 无锁语义 per-core 收益 ✅（04 §3.11）；
-- **U13b** 跨 loop 消息（唯一跨核原语）延迟/吞吐（futex/eventfd 两版）；
-- **U13c** 16 核 scaling 饱和点（内存/softirq/客户端谁先截断）；
-- **U13d** D8 理论增益：self-wake 占比（同 tick drain 的上界差，只作上界
-  参考，不作产品建议）。
+- **U13b** 跨 loop 消息延迟/吞吐（futex/eventfd）✅（04 §3.12）；
+- **U13c** 16 核 scaling 饱和点 ✅（04 §3.12：K=8 峰值，内核/客户端截断）；
+- **U13d** D8 self-wake 上界 ✅（04 §3.12：757ns×1.21 ≈ 0.92µs/req）。
 
 ---
 

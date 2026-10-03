@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -20,6 +22,8 @@
  *  --mode=ring  : N 个驻留节点 token-ring(主线程逐跳 unpark 并等待恢复),
  *                 报每跳 t0→t2 延迟分布 + RSS。N 增大时 stackful 需触碰 N 份
  *                 栈页(缓存/TLB 工作集),stackless 无栈页 → 黑盒 TLB 代理。
+ *  --mode=wake  : 同线程"自我唤醒"成本(eventfd 写→epoll 返回→drain),
+ *                 作为 D8 self-wake 的理论代理;
  *  --mode=migrate: fibre 跨线程迁移边界(切换易/所有权难):同一 ctx 由 A/B
  *                 交替 resume;报 pure resume(切换)与 wall(含跨线程交接);
  *                 并探测 local 栈变量/线程 id/TLS/线程局部地址的迁移语义。
@@ -692,6 +696,60 @@ static int run_migrate(uint64_t iters)
 	return 0;
 }
 
+/* ---------- wake:同线程自我唤醒(eventfd write→epoll 返回→drain) ---------- */
+
+static int run_wake(uint64_t iters)
+{
+	int epfd = epoll_create1(EPOLL_CLOEXEC);
+	int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	struct epoll_event ev;
+	struct epoll_event out;
+	uint64_t sum = 0;
+	uint64_t n = 0;
+	uint64_t max = 0;
+
+	if (epfd < 0 || efd < 0)
+	{
+		return 1;
+	}
+	memset(&ev, 0, sizeof(ev));
+	ev.events = EPOLLIN;
+	ev.data.u64 = 1;
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, efd, &ev) != 0)
+	{
+		return 1;
+	}
+	for (uint64_t i = 0; i < iters; i++)
+	{
+		uint64_t one = 1;
+		uint64_t v;
+		uint64_t a;
+		uint64_t b;
+		ssize_t r;
+
+		a = xr_tsc();
+		r = write(efd, &one, sizeof(one));
+		(void)r;
+		(void)epoll_wait(epfd, &out, 1, -1);
+		r = read(efd, &v, sizeof(v));
+		(void)r;
+		b = xr_tsc();
+		sum += b - a;
+		if (b - a > max)
+		{
+			max = b - a;
+		}
+		n++;
+	}
+	printf("bench_l0 wake: iters=%" PRIu64 " self-wake avg=%.0fns"
+	       " max=%.0fns (eventfd write+epoll return+drain)\n",
+	       n, (double)xr_tsc_to_ns(sum) / (double)n,
+	       (double)xr_tsc_to_ns(max));
+	close(efd);
+	close(epfd);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = "calib";
@@ -740,6 +798,10 @@ int main(int argc, char **argv)
 	if (strcmp(mode, "migrate") == 0)
 	{
 		return run_migrate(ops);
+	}
+	if (strcmp(mode, "wake") == 0)
+	{
+		return run_wake(ops);
 	}
 	XR_LOGE("unknown mode: %s", mode);
 	return 2;
