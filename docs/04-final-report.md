@@ -259,6 +259,25 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 - 限制：客户端未绑核（K≥8 核争用）；server reqs 读批计数高估 ~20%（以
   loadgen RESULT 为准）；governor=powersave。
 
+### 3.11 锁-free 单线程语义的 per-core 收益（U13a，2026-10-04）
+
+> PEL 的设计目的：fibre 同线程 ⇒ 上游业务可无锁并发。本节量化该语义
+> 保证在多核下的价值（同一 echo 服务，仅业务负载不同）。
+
+| 业务负载（256 连接，1024 mix/req） | K=1 | K=2 | K=4 | K=8 |
+|---|---|---|---|---|
+| **local**（连接本地状态，无锁） | 134–136K | 266–270K（2.0×） | 488–515K（3.7×） | **636–673K（4.8×）** |
+| **atomic**（全局原子，1024 RMW/req） | 120–138K | 160–183K（1.3×） | 170–179K（1.3×） | **140–155K（1.1×，平掉）** |
+| **mutex**（全局锁） | — | 221–307K | — | 515–635K（单锁上限 ≈500K） |
+
+- K=1 三者相近（IO 主导、无争用）；**K=8 local ≈ 4.3× atomic**；
+- atomic 曲线在 K=2 就平掉（跨核 RMW 争用）；mutex 被单锁临界区上限
+  截断（1024 mix ≈ 2µs/临界区 → ~500K locks/s）；
+- **结论**：PEL 的"业务无锁单线程"语义在多核下是实打实的 per-core 收益，
+  且与 accept 分发（连接终身单线程）自洽；shared 版本是"不可避免共享"的
+  最坏上界，可分片即退化为 per-worker 状态（即该模型本身）。
+  理论模型与 U13b–d 计划见 `docs/06-pel-modification-eval.md` §0.7。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -274,6 +293,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S10 | PEL 实测回填(doc165/166):self-wake ~100%→M1 ROI≈0;观测面+机件 +5~7% | PEL `doc165/166`、`test-logs/ebpf-park-*`、`perf-results-cross/*` |
 | S11 | fibre 迁移边界:跨线程 resume 57ns vs 同线程 15ns;栈保持、TLS/句柄随线程 | `bench-logs/bench_l0-20261003-153152.log`、`ctx_migrate` |
 | S12 | accept 分发:reuseport/dispatch K=1→4 近线性(3.8×)、零迁移;K=8 866K rps | `bench-logs/bench_scale-20261004-0054*` |
+| S13 | 锁-free 语义 per-core:K=8 local 4.8× vs atomic 1.1×(平掉);mutex 单锁上限 | `bench-logs/bench_scale-20261004-0117*` |
 
 ## 5. 风险与边界
 

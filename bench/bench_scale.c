@@ -29,20 +29,46 @@
  * 连接从 accept 起固定在同一 worker(连接=loop 归属,不迁移)。
  * 客户端用 PEL loadgen(echo,原样回显),可选内嵌 fork/exec。
  *
+ *  --work=echo|local|atomic|mutex:每请求业务负载:
+ *   echo  = 纯回显;local = 连接本地状态无锁计算;atomic = 全局原子累加;
+ *   mutex = 全局锁保护累加。用于量化"业务无锁单线程语义"的 per-core 收益
+ *   与多核扩展性(local 近线性;atomic/mutex 随 K 受缓存争用截断)。
  *   bench_scale --workers K --dist reuseport|dispatch --port P
  *               [--duration S] [--basecpu C] [--loadgen PATH]
  *               [--conns C] [--threads T] [--payload N] [--warmup S]
+ *               [--work echo|local|atomic|mutex] [--work-iters N]
  */
 
 #define SC_MAX_FD 65536
 #define SC_BUF 4096
 #define SC_QCAP 8192
 
+enum
+{
+	SC_WORK_ECHO = 0,
+	SC_WORK_LOCAL = 1,
+	SC_WORK_ATOMIC = 2,
+	SC_WORK_MUTEX = 3,
+};
+
+static _Atomic uint64_t g_work_atomic;
+static uint64_t g_work_plain;
+static pthread_mutex_t g_work_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint64_t sc_mix(uint64_t x)
+{
+	x ^= x >> 33;
+	x *= 0xff51afd7ed558ccdULL;
+	x ^= x >> 33;
+	return x;
+}
+
 typedef struct
 {
 	int fd;
 	int rlen; /* 待回显字节(0..SC_BUF) */
 	int woff;
+	uint64_t acc; /* local 业务状态 */
 	char buf[SC_BUF];
 } sc_conn_t;
 
@@ -89,6 +115,8 @@ struct sc_scale
 	int threads;
 	int payload;
 	int warmup;
+	int work_mode;
+	int work_iters;
 	sc_worker_t *ws;
 	_Atomic int rr;
 };
@@ -162,6 +190,42 @@ static void sc_add_conn(sc_worker_t *w, int fd)
 	atomic_fetch_add_explicit(&w->accepted, 1, memory_order_relaxed);
 }
 
+static void sc_do_work(sc_conn_t *c, int n, sc_scale_t *s)
+{
+	uint64_t x = c->acc + (uint64_t)n;
+
+	switch (s->work_mode)
+	{
+	case SC_WORK_ECHO:
+		return;
+	case SC_WORK_LOCAL:
+		for (int i = 0; i < s->work_iters; i++)
+		{
+			x = sc_mix(x + (uint64_t)i);
+		}
+		c->acc = x;
+		return;
+	case SC_WORK_ATOMIC:
+		for (int i = 0; i < s->work_iters; i++)
+		{
+			atomic_fetch_add_explicit(&g_work_atomic,
+						  sc_mix(x + (uint64_t)i),
+						  memory_order_relaxed);
+		}
+		c->acc = x;
+		return;
+	case SC_WORK_MUTEX:
+		pthread_mutex_lock(&g_work_mtx);
+		for (int i = 0; i < s->work_iters; i++)
+		{
+			g_work_plain += sc_mix(x + (uint64_t)i);
+		}
+		pthread_mutex_unlock(&g_work_mtx);
+		c->acc = x;
+		return;
+	}
+}
+
 static void sc_flush(sc_worker_t *w, sc_conn_t *c)
 {
 	while (c->rlen > 0)
@@ -218,6 +282,7 @@ static void sc_conn_readable(sc_worker_t *w, sc_conn_t *c)
 			c->rlen += (int)n;
 			atomic_fetch_add_explicit(&w->bytes, (uint64_t)n,
 						  memory_order_relaxed);
+			sc_do_work(c, (int)n, w->s);
 			sc_flush(w, c);
 			if (c->fd < 0)
 			{
@@ -463,6 +528,8 @@ int main(int argc, char **argv)
 	s.threads = 4;
 	s.payload = 1024;
 	s.warmup = 1;
+	s.work_mode = SC_WORK_ECHO;
+	s.work_iters = 1024;
 	for (int i = 1; i < argc; i++)
 	{
 		if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc)
@@ -504,6 +571,31 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
 		{
 			s.warmup = atoi(argv[++i]);
+		}
+		else if (strcmp(argv[i], "--work") == 0 && i + 1 < argc)
+		{
+			const char *m = argv[++i];
+
+			if (strcmp(m, "local") == 0)
+			{
+				s.work_mode = SC_WORK_LOCAL;
+			}
+			else if (strcmp(m, "atomic") == 0)
+			{
+				s.work_mode = SC_WORK_ATOMIC;
+			}
+			else if (strcmp(m, "mutex") == 0)
+			{
+				s.work_mode = SC_WORK_MUTEX;
+			}
+			else
+			{
+				s.work_mode = SC_WORK_ECHO;
+			}
+		}
+		else if (strcmp(argv[i], "--work-iters") == 0 && i + 1 < argc)
+		{
+			s.work_iters = atoi(argv[++i]);
 		}
 	}
 	xr_time_init();
@@ -567,9 +659,15 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
-	printf("bench_scale: workers=%d dist=%s port=%d conns=%d payload=%d\n",
+	printf("bench_scale: workers=%d dist=%s port=%d conns=%d payload=%d"
+	       " work=%s iters=%d\n",
 	       s.n, s.reuseport != 0 ? "reuseport" : "dispatch", s.port,
-	       s.conns, s.payload);
+	       s.conns, s.payload,
+	       s.work_mode == SC_WORK_LOCAL   ? "local"
+	       : s.work_mode == SC_WORK_ATOMIC ? "atomic"
+	       : s.work_mode == SC_WORK_MUTEX  ? "mutex"
+					       : "echo",
+	       s.work_iters);
 	fflush(stdout);
 	t0 = xr_now_ns();
 	sc_spawn_loadgen(&s);

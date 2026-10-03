@@ -200,6 +200,11 @@ scripts/run-bench.sh release bench_scale --workers 4 --dist reuseport --port 231
     --duration 5 --conns 256 --loadgen $LG
 scripts/run-bench.sh release bench_scale --workers 4 --dist dispatch --port 23100 \
     --duration 5 --conns 256 --loadgen $LG
+# 锁-free 语义 per-core 收益(U13a):local 无锁 vs atomic/mutex 共享
+scripts/run-bench.sh release bench_scale --workers 8 --dist reuseport --port 23100 \
+    --duration 5 --conns 256 --work local --work-iters 1024 --loadgen $LG
+scripts/run-bench.sh release bench_scale --workers 8 --dist reuseport --port 23100 \
+    --duration 5 --conns 256 --work atomic --work-iters 1024 --loadgen $LG
 # L0 迁移边界与标定
 scripts/run-bench.sh release bench_l0 --mode migrate --ops 200000
 scripts/run-bench.sh release bench_l0 --mode ring --l0 fibre --fibres 100000 --ops 2000000 --stack 16384

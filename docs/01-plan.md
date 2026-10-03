@@ -317,6 +317,22 @@ S12 验证(U12 多 loop accept 分发;2026-10-04,release,PEL loadgen echo
   (以 loadgen RESULT 为准);governor=powersave。
 - 日志:`bench-logs/bench_scale-20261004-0054*`。
 
+S13 验证(U13a 锁-free 单线程语义的 per-core 收益;2026-10-04,release,
+PEL loadgen echo 1KB,256 连接,每请求 1024 次 mix 业务):
+- `bench_scale --work=echo|local|atomic|mutex`:
+  - **local**(连接本地状态,无锁):K=1 134~136K → K=2 266~270K(2.0×)
+    → K=4 488~515K(3.7×)→ K=8 636~673K(4.8×);
+  - **atomic**(全局原子累加,1024 RMW/req):K=1 120~138K → K=2 160~183K
+    (1.3×)→ K=4 170~179K(1.3×)→ K=8 140~155K(**1.1×,平掉**);
+  - **mutex**(全局锁,1024 mix/临界区):K=2 221~307K;K=8 515~635K
+    (单锁临界区上限 ≈1/(1024×~2ns)≈500K,饱和);
+- K=8:**local ≈ 4.3× atomic**;mutex 受单锁上限截断;K=1 三者相近
+  (IO 主导,无争用);
+- 结论:PEL"业务无锁单线程"语义在多核下是**实打实的 per-core 收益**
+  (省原子/锁/缓存行弹跳),且与 accept 分发(连接终身单线程)自洽;
+  shared 版本是"不可避免共享"的最坏上界(可分片即退化为 per-worker 状态)。
+- 日志:`bench-logs/bench_scale-20261004-0117*`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差
