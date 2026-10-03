@@ -81,6 +81,10 @@
 1. **P1 观测面回收**（低风险；doc166 已做一半）；
 2. **P2 阻塞机件行级定位**（doc166 §3.1b，中风险，走三面门禁）；
 3. **P3 多 worker 分发**（若目标含多线程对标：migrate/per-channel listener）；
+   **U11 已验证边界**（04 §3.9）：跨线程 resume 周期 57~58ns（与同线程
+   12~16ns 同量级，栈在进程 VA 天然可迁移），但线程 id/TLS/缓存句柄随线程
+   变化 → 真实成本在**在途注册重绑 + TLS 契约**，不在栈；故优先 accept 时
+   分发（不搬 handle），迁移只作再平衡；
 4. **P4 M2 减少阻塞调用数**（send 快路径/批量；受 D9 约束，需产品确认完成
    粒度语义）；
 5. **P5 M1 futex**：仅"真跨线程通知"或形态 B/C 另案评审，现有形态不作为
@@ -334,7 +338,9 @@ sudo perf stat -e dtlb-loads,dtlb-load-misses,cycles,instructions -- \
 5. **阻塞机件 ~6.4% 的行级下钻**（doc166 §3.1b 下批：单点定位 + 单变量 A/B，
    预期 +3%）；
 6. **多 worker 分发**（per-connection migrate / per-channel listener）与
-   SO_REUSEPORT 可行性（多线程对标能力课题）；
+   SO_REUSEPORT 可行性（多线程对标能力课题）；**U11（04 §3.9）**：迁移在
+   切换层便宜（57ns/周期），成本在在途注册重绑与 TLS 契约 → 优先 accept
+   时分发，迁移只作再平衡；
 7. hybrid 路由（形态 B）的"无 IO"窗口判定与丢唤醒注入测试；形态 B 与
    D8 帧寿命红线的关系；
 8. vstack 真实 VMA/RSS/TLB（沙盒数为下限；默认 `vm.max_map_count=65530`

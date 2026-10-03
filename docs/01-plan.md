@@ -276,6 +276,25 @@ S10 验证(PEL 侧实测回填,doc165/166;2026-10-03):
 - 文档:PEL `docs/165-m1-futex-transport-design.md`、
   `docs/166-high-concurrency-attribution.md`;xruntime 06 §0、04 §3.8。
 
+S11 验证(U11 fibre 跨线程迁移边界;2026-10-03,release):
+- 实现:`bench_l0 --mode=migrate`(同一 ctx 由 A/B 线程交替 resume;探测
+  栈局部/TLS/线程 id)+ `tests/test_ctx_migrate`(原子 body 迁移 1000 次、
+  语义边界、同线程对照)。
+- 计时:同线程 resume 周期 **12~16ns**;跨线程 resume 周期 **57~58ns**
+  (冷栈/cache 迁移);完整交接 wall 102~105ns(handoff ≈45ns)。
+- 语义边界(noinline+asm memory clobber 探针):
+  - 栈局部变量与地址跨迁移保持(same=1/addr_same=1)→ 栈在进程 VA,
+    切换层天然支持迁移;
+  - 线程 id、TLS 值、TLS 地址**全部随线程变化** → 挂起帧里缓存的 loop/
+    句柄指针、TLS 值、errno、per-thread arena 迁移后失效,必须重绑/虚拟化;
+  - release 下编译器把 `pthread_self()`(glibc const)与 TLS 地址跨 suspend
+    **CSE**——探针需 noinline+asm clobber 才测得到;这是"陈旧缓存"风险在
+    编译器层的实例。
+- 结论:"切换容易,所有权难"成立;迁移真实成本 = 在途注册(uv handle/
+  timer/parker registry)重绑 + TLS 契约,不在栈/切换。PEL 推论:优先
+  accept 时分发(不搬 handle),迁移只作再平衡。
+- 日志:`bench-logs/bench_l0-20261003-153152.log`;测试 `ctx_migrate`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差

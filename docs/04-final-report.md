@@ -220,6 +220,23 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
    形态 B/C 另案）→ P6 M3。完整评估见 `docs/06-pel-modification-eval.md`
    §0。
 
+### 3.9 fibre 迁移边界（U11，2026-10-03）
+
+> 验证"多核分发为什么难"：栈/切换 vs 所有权。`bench_l0 --mode=migrate`
+> 用同一 ctx 由 A/B 线程交替 resume；`tests/test_ctx_migrate` 固定边界。
+
+- **切换层（容易）**：同线程 resume 周期 12~16ns；跨线程 resume 周期
+  **57~58ns**（冷栈/cache 迁移），完整交接 wall 102~105ns（handoff ≈45ns）；
+  栈局部变量与地址跨迁移保持（栈在进程 VA）——**fibre 迁移在切换层天然可行**。
+- **语义/所有权层（难）**：线程 id、TLS 值、TLS 地址全部随线程变化 →
+  挂起帧里缓存的 loop/句柄指针、TLS 值、errno、per-thread arena 迁移后
+  失效，必须重绑/虚拟化；release 下编译器还会把 `pthread_self()`（glibc
+  `const`）与 TLS 地址**跨 suspend CSE**（探针需 noinline+asm clobber）——
+  这是"陈旧缓存"风险的编译器层实例。
+- **对 PEL 的推论**：迁移的真实成本 = 在途注册（uv handle/timer/parker
+  registry）重绑 + TLS 契约，不在栈；因此多核扩展优先 **accept 时分发**
+  （per-channel listener/SO_REUSEPORT，不搬 handle），迁移只作再平衡。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -233,6 +250,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S8 | park 口径 bug 修正 + fibre echo 对照 + ring 驻留/TLB/VMA | `bench-logs/bench_{echo,l0}-20261003-0310*`、`perf-tlb-20261003-031138.log` |
 | S9 | park 次数削减曲线:B=1→8 吞吐 +4~8×、p50 恒定、parks/req 1→0.12 | `bench-logs/bench_echo-20261003-0341*` |
 | S10 | PEL 实测回填(doc165/166):self-wake ~100%→M1 ROI≈0;观测面+机件 +5~7% | PEL `doc165/166`、`test-logs/ebpf-park-*`、`perf-results-cross/*` |
+| S11 | fibre 迁移边界:跨线程 resume 57ns vs 同线程 15ns;栈保持、TLS/句柄随线程 | `bench-logs/bench_l0-20261003-153152.log`、`ctx_migrate` |
 
 ## 5. 风险与边界
 

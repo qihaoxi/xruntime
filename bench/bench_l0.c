@@ -5,6 +5,7 @@
 #include "xr/xr_worker.h"
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +20,11 @@
  *  --mode=ring  : N 个驻留节点 token-ring(主线程逐跳 unpark 并等待恢复),
  *                 报每跳 t0→t2 延迟分布 + RSS。N 增大时 stackful 需触碰 N 份
  *                 栈页(缓存/TLB 工作集),stackless 无栈页 → 黑盒 TLB 代理。
- *   bench_l0 [--mode calib|create|ring] [--l0 stackless|fibre] [--ops N]
- *            [--fibres N] [--stack BYTES] [--wkcpu C] [--prodcpu C]
+ *  --mode=migrate: fibre 跨线程迁移边界(切换易/所有权难):同一 ctx 由 A/B
+ *                 交替 resume;报 pure resume(切换)与 wall(含跨线程交接);
+ *                 并探测 local 栈变量/线程 id/TLS/线程局部地址的迁移语义。
+ *   bench_l0 [--mode calib|create|ring|migrate] [--l0 stackless|fibre]
+ *            [--ops N] [--fibres N] [--stack BYTES] [--wkcpu C] [--prodcpu C]
  */
 
 static _Atomic int calib_done;
@@ -448,6 +452,246 @@ static int run_ring(int l0_fibre, int n, uint64_t sample_target,
 	return 0;
 }
 
+/* ---------- migrate:fibre 跨线程迁移边界(切换易/所有权难) ---------- */
+
+static _Thread_local uint64_t mig_tls_val;
+static _Thread_local int mig_tls_loop;
+
+/* noinline 探针:防编译器把 pthread_self(const)/TLS 地址跨 suspend CSE。
+ * 注意:release 下普通写法会被 CSE——这本身就是迁移风险(缓存值跨迁移失效)。 */
+__attribute__((noinline)) static uint64_t mig_probe_tid(void)
+{
+	__asm__ __volatile__("" ::: "memory");
+	return (uint64_t)pthread_self();
+}
+
+__attribute__((noinline)) static uintptr_t mig_probe_tls_addr(void)
+{
+	__asm__ __volatile__("" ::: "memory");
+	return (uintptr_t)&mig_tls_loop;
+}
+
+__attribute__((noinline)) static uint64_t mig_probe_tls_val(void)
+{
+	__asm__ __volatile__("" ::: "memory");
+	return mig_tls_val;
+}
+
+typedef struct
+{
+	xr_ctx_t *ctx;
+	xr_task_t task;
+	_Atomic uint64_t turn;
+	uint64_t total; /* resume 总次数 = iters + 1 */
+	uint64_t iters; /* suspend 次数 */
+	uint64_t a_pure, a_n;
+	uint64_t b_pure, b_n;
+	/* 迁移语义探测 */
+	uint64_t local_b, local_a;
+	uintptr_t addr_b, addr_a;
+	uint64_t tid_b, tid_a;
+	uint64_t tls_b, tls_a;
+	uintptr_t loop_b, loop_a;
+} mig_t;
+
+typedef struct
+{
+	mig_t *m;
+	int id; /* 0=A,1=B */
+} mig_arg_t;
+
+static void mig_entry(xr_task_t *t)
+{
+	mig_t *m = t->user;
+	uint64_t local = 0xDEADBEEFCAFEull;
+
+	m->local_b = local;
+	m->addr_b = (uintptr_t)&local;
+	m->tid_b = mig_probe_tid();
+	m->tls_b = mig_probe_tls_val();
+	m->loop_b = mig_probe_tls_addr();
+	for (uint64_t i = 0; i < m->iters; i++)
+	{
+		xr_ctx_suspend(m->ctx);
+	}
+	m->local_a = local;
+	m->addr_a = (uintptr_t)&local;
+	m->tid_a = mig_probe_tid();
+	m->tls_a = mig_probe_tls_val();
+	m->loop_a = mig_probe_tls_addr();
+}
+
+static void *mig_thread(void *arg)
+{
+	mig_arg_t *a = arg;
+	mig_t *m = a->m;
+	int me = a->id;
+	uint64_t pure = 0;
+	uint64_t n = 0;
+
+	mig_tls_val = me == 0 ? 0xA11Aull : 0xB0Bull;
+	mig_tls_loop = me;
+	for (;;)
+	{
+		uint64_t t = atomic_load_explicit(&m->turn,
+						  memory_order_acquire);
+		uint64_t t0;
+
+		if (t >= m->total)
+		{
+			break;
+		}
+		if ((int)(t & 1u) != me)
+		{
+			xr_cpu_relax();
+			continue;
+		}
+		t0 = xr_tsc();
+		xr_ctx_resume(m->ctx);
+		pure += xr_tsc() - t0;
+		n++;
+		atomic_store_explicit(&m->turn, t + 1, memory_order_release);
+	}
+	if (me == 0)
+	{
+		m->a_pure = pure;
+		m->a_n = n;
+	}
+	else
+	{
+		m->b_pure = pure;
+		m->b_n = n;
+	}
+	return NULL;
+}
+
+static int run_migrate(uint64_t iters)
+{
+	mig_t m;
+	mig_arg_t aa;
+	mig_arg_t ab;
+	pthread_t ta;
+	pthread_t tb;
+	uint64_t t_wall0, t_wall1;
+	uint64_t pure;
+	uint64_t n;
+	uint64_t sum = 0;
+	uint64_t sn = 0;
+
+	memset(&m, 0, sizeof(m));
+	m.iters = iters;
+	m.total = iters + 1;
+	m.task.user = &m;
+	m.ctx = xr_ctx_create(&m.task, mig_entry, 0);
+	if (m.ctx == NULL)
+	{
+		XR_LOGE("migrate ctx create failed");
+		return 1;
+	}
+
+	/* 阶段 1:同线程 resume 基线(纯切换) */
+	{
+		uint64_t t0 = xr_now_ns();
+		uint64_t t1;
+
+		mig_tls_val = 0xAAAAull;
+		mig_tls_loop = 42;
+		xr_ctx_resume(m.ctx);
+		while (xr_ctx_state(m.ctx) != XR_CTX_DONE)
+		{
+			uint64_t a = xr_tsc();
+
+			xr_ctx_resume(m.ctx);
+			sum += xr_tsc() - a;
+			sn++;
+		}
+		t1 = xr_now_ns();
+		printf("bench_l0 migrate: same-thread resumes=%" PRIu64
+		       "  pure=%.1f ns/resume  wall=%.1f ns/resume\n",
+		       sn + 1, (double)xr_tsc_to_ns(sum) / (double)sn,
+		       (double)(t1 - t0) / (double)(sn + 1));
+	}
+
+	/* 阶段 2:跨线程迁移(A/B 交替 resume;pure=切换,wall=含交接) */
+	memset(&m, 0, sizeof(m));
+	m.iters = iters;
+	m.total = iters + 1;
+	m.task.user = &m;
+	m.ctx = xr_ctx_create(&m.task, mig_entry, 0);
+	if (m.ctx == NULL)
+	{
+		XR_LOGE("migrate ctx create failed");
+		return 1;
+	}
+	aa.m = &m;
+	aa.id = 0;
+	ab.m = &m;
+	ab.id = 1;
+	t_wall0 = xr_now_ns();
+	if (pthread_create(&ta, NULL, mig_thread, &aa) != 0 ||
+	    pthread_create(&tb, NULL, mig_thread, &ab) != 0)
+	{
+		XR_LOGE("migrate pthread create failed");
+		return 1;
+	}
+	pthread_join(ta, NULL);
+	pthread_join(tb, NULL);
+	t_wall1 = xr_now_ns();
+	pure = m.a_pure + m.b_pure;
+	n = m.a_n + m.b_n;
+	printf("bench_l0 migrate: cross-thread resumes=%" PRIu64
+	       "  pure=%.1f ns/resume  wall=%.1f ns/resume"
+	       "  handoff≈%.1f ns\n",
+	       n, (double)xr_tsc_to_ns(pure) / (double)n,
+	       (double)(t_wall1 - t_wall0) / (double)n,
+	       (double)(t_wall1 - t_wall0) / (double)n -
+		       (double)xr_tsc_to_ns(pure) / (double)n);
+
+	/* 阶段 3:迁移语义探测(iters=1,同一次挂起跨线程恢复) */
+	{
+		mig_t p;
+
+		memset(&p, 0, sizeof(p));
+		p.iters = 1;
+		p.total = 2;
+		p.task.user = &p;
+		p.ctx = xr_ctx_create(&p.task, mig_entry, 0);
+		if (p.ctx == NULL)
+		{
+			XR_LOGE("migrate ctx create failed");
+			return 1;
+		}
+		aa.m = &p;
+		aa.id = 0;
+		ab.m = &p;
+		ab.id = 1;
+		if (pthread_create(&ta, NULL, mig_thread, &aa) != 0 ||
+		    pthread_create(&tb, NULL, mig_thread, &ab) != 0)
+		{
+			XR_LOGE("migrate pthread create failed");
+			return 1;
+		}
+		pthread_join(ta, NULL);
+		pthread_join(tb, NULL);
+		printf("bench_l0 migrate probe:\n");
+		printf("  stack local : same=%d addr_same=%d (0x%" PRIx64 ")\n",
+		       p.local_b == p.local_a, p.addr_b == p.addr_a,
+		       p.local_a);
+		printf("  thread id   : changed=%d (A=%" PRIu64 " B=%" PRIu64
+		       ")\n",
+		       p.tid_b != p.tid_a, p.tid_b, p.tid_a);
+		printf("  TLS value   : changed=%d (before=0x%" PRIx64
+		       " after=0x%" PRIx64 ") → 语义随线程\n",
+		       p.tls_b != p.tls_a, p.tls_b, p.tls_a);
+		printf("  TLS addr    : changed=%d → 缓存句柄/loop 指针必须重绑\n",
+		       p.loop_b != p.loop_a);
+		xr_ctx_destroy(p.ctx);
+	}
+
+	xr_ctx_destroy(m.ctx);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = "calib";
@@ -492,6 +736,10 @@ int main(int argc, char **argv)
 	if (strcmp(mode, "ring") == 0)
 	{
 		return run_ring(l0_fibre, fibres, ops, stack);
+	}
+	if (strcmp(mode, "migrate") == 0)
+	{
+		return run_migrate(ops);
 	}
 	XR_LOGE("unknown mode: %s", mode);
 	return 2;
