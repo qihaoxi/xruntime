@@ -26,6 +26,9 @@
    与事件面形态(需 L0 对照轮,见 01 §0.5),而非唤醒链。
    **L0 对照轮已做(§3.6)**:每次切换模型税 ±30–60ns,跨线程 V0 +1.4~2.0%、
    V5 排序不变 → 不被栈模型否决;量级差只剩高频创建/销毁(51×)与未测 TLB。
+   **PEL 实测回填(§3.8,doc165/166)**:PEL 请求形态唤醒 ~100% self-wake,
+   **M1 futex ROI≈0**;PEL 优先级=观测面+阻塞机件(doc166,预期 +5~7%)与
+   减少阻塞调用数;U9 曲线不可外推 PEL。
 
 ## 1. 问题一:PEL 残差是否在 wake 机制?
 
@@ -104,6 +107,8 @@
 > 性质:**工程预估(待 PEL 同窗 A/B 确认),非承诺**。沙盒量的是"唤醒对"本身;
 > PEL 每对还叠加 registry/锁/队列/栈切换/loop tick,且高并发下 transport 早已
 > 被 libuv pending 合并——**不能按沙盒 -88% 直接外推**。
+> **已被 §3.8 PEL 实测修正**:PEL 唤醒 ~100% self-wake,M1 现有形态 ROI≈0;
+> 下表仅留档外推口径。
 
 | 场景 | PEL 现状(doc151 §4.3/终态矩阵) | hybrid 回灌预估 | 依据 |
 |---|---|---|---|
@@ -186,6 +191,35 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
   管 N op);代价是 p99 批尾与 API 语义(背压/完成粒度)变化,B=4~8 是
   延迟/吞吐折中点。
 
+### 3.8 PEL 侧实测裁定回填（doc165/166，2026-10-03）
+
+> 本节**优先于 §3.5 的外推**。PEL 用 eBPF（doc165）与 perf（doc166）闭环了
+> 关键假设，结论有实质修正。
+
+1. **唤醒是 self-wake**：PEL echo/http/chan/多 worker 形态下 `uv_async_send`
+   与 `epoll_pwait` 同 tid，跨线程唤醒 ~0%（http c=1 仅 0.025%）；eventfd
+   的作用是打断本线程 epoll 让 ready_queue 本轮 drain（D8）。
+   **futex 的跨线程 −88% 不直接适用，M1 ROI≈0（现有形态）**；仅真跨线程
+   场景或形态 B（idle-loop futex）另案评审。
+2. **每请求挂起与即时消费**：c=1 挂起 2.11–2.4/req、eventfd 写 1.21/req、
+   EAGAIN=0、即时消费 0.38%；c=16 挂起 1.21、写 0.076、send 半边即时消费
+   ~50%。**try-before-park 无靶；M2 杠杆=减少阻塞调用数**（受 D9 用户
+   裁决约束：libuv 写完成回调是完成确认点）。
+3. **收益上界**（同窗 PEL vs libuv-raw）：c=1 0.82（PEL 额外 +2.1µs/req →
+   M2/self-wake 总上界 **≈ +20%**）；c=16 0.76、c=256 0.64 与唤醒无关
+   （eventfd 已合并到 0.076/0.005）。
+4. **高并发归因（doc166）**：c=256 单 worker 饱和为 subject 构造（同口径
+   单 loop 对比，0.64–0.76× 非单核假差）；差距集中 PEL 用户态 16.95% vs
+   uv 2.56%：观测面 ~3.8% + 阻塞机件 ~6.4%。观测面批已落地（−2.2pt、
+   +1.0% rps、p50 −2%）；机件行级预期 +5~7% → **0.75→0.80~0.83×**；
+   1.0× 仍需事件面/分发形态。
+5. **U9 修正**：沙盒 +4~8× 来自跨 worker park 削减，**不可外推 PEL**
+   （PEL 是 self-wake + 阻塞调用数）；机制事实仍成立。
+6. **修正后优先级**：P1 观测面（已做一半）→ P2 阻塞机件行级 → P3 多
+   worker 分发（多线程对标）→ P4 M2 减调用数（受 D9）→ P5 M1（真跨线程/
+   形态 B/C 另案）→ P6 M3。完整评估见 `docs/06-pel-modification-eval.md`
+   §0。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -198,6 +232,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S7 | L0 对照:cross V0 +1.4~2.0%、V5 排序不变、创建 51×、切换 5.6ns | `bench-logs/bench_{roundtrip,l0}-20261003-0240*` |
 | S8 | park 口径 bug 修正 + fibre echo 对照 + ring 驻留/TLB/VMA | `bench-logs/bench_{echo,l0}-20261003-0310*`、`perf-tlb-20261003-031138.log` |
 | S9 | park 次数削减曲线:B=1→8 吞吐 +4~8×、p50 恒定、parks/req 1→0.12 | `bench-logs/bench_echo-20261003-0341*` |
+| S10 | PEL 实测回填(doc165/166):self-wake ~100%→M1 ROI≈0;观测面+机件 +5~7% | PEL `doc165/166`、`test-logs/ebpf-park-*`、`perf-results-cross/*` |
 
 ## 5. 风险与边界
 

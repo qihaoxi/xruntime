@@ -254,12 +254,37 @@ S9 验证(park 次数削减曲线,U9;2026-10-03,release):
   延迟/吞吐折中(p99 批尾换吞吐)。
 - 日志:`bench-logs/bench_echo-20261003-0341*`。
 
+S10 验证(PEL 侧实测回填,doc165/166;2026-10-03):
+- **doc165 eBPF**(bench_pel_echo/http + loadgen,uprobe/kprobe/tracepoint):
+  - 唤醒 **~100% self-wake**(`uv_async_send` tid == `epoll_pwait` tid;
+    http c=1 仅 0.025% 跨线程)→ **M1 futex 跨线程收益不适用,ROI≈0**;
+  - 实际挂起/req:echo c=1 **2.11**、c=16 1.21、c=256 1.18、http c=1 2.29;
+    eventfd 写/req:c=1 1.21、c=16 0.076、c=256 0.0049(合并已强);
+  - EAGAIN=0;阻塞调用 2.40/req(c=1);即时消费 c=1 **0.38%**、c=16 ~50%
+    (send 半边)→ **try-before-park 无靶;M2 杠杆=减少阻塞调用数**(受 D9
+    约束:libuv 写完成回调是完成确认点);
+  - PEL vs libuv-raw 同窗:echo c=1 0.82(**PEL 额外 +2.1µs/req →
+    M2/self-wake 总上界 ≈ +20%**)、c=16 0.76、c=256 0.64(c≥16 与唤醒
+    无关,eventfd 已合并)。
+- **doc166 perf**(c=256):单 worker 饱和为 subject 构造(同口径单 loop);
+  差距集中 PEL 用户态 16.95% vs uv 2.56%:观测面 ~3.8% + 阻塞机件 ~6.4%;
+  观测面批已落地(-2.2pt、+1.0% rps、p50 -2%);机件行级预期 +5~7% →
+  **0.75→0.80~0.83×**;1.0× 仍需事件面/分发。
+- **修正**:04 §3.5/§3.8、06 §0;U9 +4~8× **不可外推 PEL**(跨 worker park
+  削减 vs self-wake+调用数);PEL 优先级=观测面→阻塞机件→多 worker 分发
+  →M2 减调用数→M1 另案→M3。
+- 文档:PEL `docs/165-m1-futex-transport-design.md`、
+  `docs/166-high-concurrency-attribution.md`;xruntime 06 §0、04 §3.8。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差
   ±30–60ns、跨线程 V0 +1.4~2.0%、每请求 park 次数不变、V5 排序不变 →
   不否决机制结论;stackful 的规模约束 = **创建 51× / VMA 上限(~32.7K
   并发)/ 100K 驻留 RSS 422MB**,均属"下限估计"(真实 vstack 更高)。
+- **PEL 实测修正(S10)**:沙盒结论以"跨线程 transport"为前提;PEL 服务形态
+  self-wake ~100% → M1 ROI≈0;回灌优先级/收益上界以 PEL doc165/166 为准
+  (xruntime 06 §0、04 §3.8 已修正)。
 - 无 libuv 的 loop 与 uv 合并/回调时序不同:V1 同线程直投在 PEL 曾被 D8
   否决(帧寿命契约),**结论迁移回 PEL 必须重新评审**(doc155 §7.7 反绕过
   纪律同样适用);沙盒结果不直接构成对 PEL 核心目录的修改依据。

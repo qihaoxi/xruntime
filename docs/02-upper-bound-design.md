@@ -390,6 +390,10 @@ eventfd   :仅 poll 集变化/超时/关闭等控制面(低频)
   (V9.1),eventfd 也可省;
 - 收敛点不变:notify=`task_deliver` · transport=`worker_wake`(唯一) ·
   resume=`worker_run_task`;三者除明确的安全点直投(V1/V7)外不得互相内联。
+- **PEL 实测对位(doc165)**:服务形态唤醒 ~100% self-wake(loop 既 poll 又
+  跑回调,即无角色分层);eventfd 的作用是打断自身 epoll 让 ready 本轮
+  drain。tokio 式分层可消除 self-wake,但 stackful 同线程回调下触 D8 帧
+  寿命红线 → 属另案,不在 M1 回灌范围。
 
 ## 4. 分段预算与目标数字
 
