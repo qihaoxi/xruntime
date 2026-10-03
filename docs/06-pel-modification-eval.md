@@ -91,6 +91,76 @@
    第一优先；
 6. **P6 M3 io_uring**：形态 C/事件面替代面，先量 D7 后剩余。
 
+### 0.6 分阶段去线程绑定（唯一收敛点）
+
+> 目标：**暂不做迁移**，但把线程绑定逐步收敛为"一个可 CAS 的 owner + 一个
+> rebind 漏斗"，使迁移（或 accept 分发）未来只需动收敛点，不必大爆炸重写。
+> 与 00 约束的"唯一漏斗"同构：每个功能唯一入口，线程亲和唯一出口。
+
+#### 0.6.1 线程绑定普查（S0，先做）
+
+没有这张表，"逐步"一定漏。请求路径上的状态按四类登记：
+
+| 类别 | 例子（PEL） | 迁移处置 |
+|---|---|---|
+| **不可变** | 常量、只读配置、代码 | 任意线程安全 |
+| **per-worker（可收敛）** | scheduler 状态、ready 队列、registry、loop 指针、pending 合并字 | 收进 `pel_exec_t`；迁移=换指针 |
+| **per-fibre（应堆化）** | parker、注册句柄、timer/io 在途表、owner | 堆对象 + 原子 owner；rebind 漏斗 |
+| **per-thread 叶子（无法堆化）** | `errno`、per-thread allocator arena、OpenSSL error queue、`pthread_self` 缓存、libuv 内部 TLS | 契约/审计或 save-restore；**不得跨 park 缓存** |
+
+- 工具：doc166 perf + U11 探针法（noinline + asm memory clobber，防编译器把
+  `pthread_self`（glibc `const`）与 TLS 地址跨 suspend CSE——U11 已实测）。
+- 产出：状态清单 + 每项归属 + 迁移语义标注；作为后续门禁的输入。
+
+#### 0.6.2 S1 收敛（低风险，可先做）
+
+1. 所有 per-worker 运行时状态收进单一 `pel_exec_t`（堆），调用方只持指针，
+   **不新增 `__thread`**（lint 门禁，仿 G 规则；允许清单仅不可变/叶子）；
+2. `fibre_context` 堆化 + **原子 owner 字段**；parker/registry/在途表都挂在
+   它下面，owner 是唯一权威（TLS 里的 worker 指针降级为"非权威提示"，
+   如 xruntime 的 `tls_worker`）；
+3. **rebind 唯一漏斗**：迁移/换 owner 时的注册重绑只允许经此函数，禁止
+   分散在各模块；
+4. 判据：无功能变化；同窗 A/B 确认间接层开销（预期每热路径几 ns，需实测）。
+
+#### 0.6.3 S2 静默迁移契约（只有需要再平衡时才做）
+
+- **可迁点定义**：`已挂起 && 无在途 handle/timer/IO` 的 fibre 才可迁；
+  有在途 IO 的 fibre **钉住**，在其完成回调里做 CAS+rebind（完成回调本身
+  在旧 loop，重绑后把 fibre 投到新 owner 队列）。
+- 不变式：owner CAS 与在途表 rebind 在同一漏斗内完成；迁移窗口内唤醒
+  必须经 owner 字段路由（丢唤醒注入测试 + tsan）。
+- 这与 U11 结论一致：切换层便宜（跨线程 resume 周期 57ns，栈在进程 VA），
+  成本全在注册重绑与 TLS 契约（§0.6.1 的第四类）。
+
+#### 0.6.4 S3 accept 分发（最便宜，且不依赖 S1/S2）
+
+- per-channel listener / SO_REUSEPORT / round-robin 到多 loop：连接从生到
+  死都在一个 worker，**不搬 handle、不迁移**；这是 Netty 式答案，也是
+  doc166 §1 指向的方向。
+- 与 S1/S2 独立：先做 S3 拿容量，S1 并行收敛结构，S2 只在"必须再平衡"
+  的证据出现后立项。
+
+#### 0.6.5 S4（可选）work stealing
+
+- 只有再平衡有数据才做；原语已在 xruntime 验证：owner CAS + MPSC 入队
+  （V3）+ futex 唤醒（V5）。不做也不影响 S1–S3。
+
+#### 0.6.6 成本、风险与门禁
+
+| 项 | 内容 |
+|---|---|
+| 成本 | owner 间接（几 ns/热路径，A/B）；S1 重构面广但语义不变 |
+| 风险 | **假安全**：堆化做完但 TLS 契约没做 → 迁移偶发错数据；故 S1 与 S0/S2 必须捆绑 |
+| 门禁 | 禁新增 `__thread`（lint）；rebind 唯一漏斗（code review + 测试）；每阶段同窗 A/B + 三面 sanitizer |
+| 回滚 | 每阶段保留旧路径/开关；S3 可独立回退 |
+
+#### 0.6.7 与 M1/M2 的关系
+
+- 完全正交：M1/M2 是唤醒与调用数（现有单 worker 形态）；S1–S4 是多核
+  分发能力。P1/P2（doc166 用户态回收）不需要它们；只有"多线程对标"目标
+  才触发 S3→S1→S2 的顺序。
+
 ---
 
 ## 1. 问题定义与目标

@@ -236,6 +236,8 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 - **对 PEL 的推论**：迁移的真实成本 = 在途注册（uv handle/timer/parker
   registry）重绑 + TLS 契约，不在栈；因此多核扩展优先 **accept 时分发**
   （per-channel listener/SO_REUSEPORT，不搬 handle），迁移只作再平衡。
+  分阶段去线程绑定方案（唯一收敛点 S0–S4：普查/收敛/静默迁移契约/accept
+  分发/可选偷取）见 `docs/06-pel-modification-eval.md` §0.6。
 
 ## 4. 执行摘要与证据位置
 
