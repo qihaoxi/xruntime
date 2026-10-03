@@ -295,6 +295,28 @@ S11 验证(U11 fibre 跨线程迁移边界;2026-10-03,release):
   accept 时分发(不搬 handle),迁移只作再平衡。
 - 日志:`bench-logs/bench_l0-20261003-153152.log`;测试 `ctx_migrate`。
 
+S12 验证(U12 多 loop accept 分发;2026-10-04,release,PEL loadgen echo
+1KB,连接从 accept 固定同 worker、无迁移):
+- 实现:`bench/bench_scale.c`(自持 epoll mini-echo;`--dist=reuseport`
+  每 worker SO_REUSEPORT;`--dist=dispatch` worker0 accept + round-robin
+  投递其他 worker;内嵌 fork/exec loadgen)。
+- scaling(256 连接,4 客户端线程,2 轮):
+  - reuseport:K=1 168~173K → K=2 337~351K(**2.0×**)→ K=4 634~673K
+    (**3.8×**)→ K=8 658~684K(客户端饱和);
+  - dispatch:K=1 153~165K → K=2 335~352K → K=4 631~635K → K=8 644~672K
+    (同曲线);
+  - 更大客户端(512 连接,8 线程):reuseport K=8 **866K rps**(仍在上扩)。
+- 分布:reuseport 内核 hash 不匀(K=8 accept 22~42/worker),dispatch
+  round-robin 完全均匀(32/32);dispatch handoff 均值 24~849µs 被目标
+  worker 排队主导(每连接一次性,对长连接吞吐无影响)。
+- p50 随 K 下降:K=1 1.4ms → K=2 0.7ms → K=4/8 0.33ms(c=256)。
+- 结论:**accept 时分发近线性扩展且零迁移**,验证 06 §0.6 S3 与 doc166 §1
+  方向;两设计等效(dispatch 更匀,reuseport 更省协调);内核 hash 不匀可
+  用 BPF 或 dispatch 兜底。
+- 限制:客户端未绑核,K≥8 有核争用;server reqs 因读批计数高估 ~20%
+  (以 loadgen RESULT 为准);governor=powersave。
+- 日志:`bench-logs/bench_scale-20261004-0054*`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差

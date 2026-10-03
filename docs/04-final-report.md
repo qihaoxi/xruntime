@@ -239,6 +239,26 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
   分阶段去线程绑定方案（唯一收敛点 S0–S4：普查/收敛/静默迁移契约/accept
   分发/可选偷取）见 `docs/06-pel-modification-eval.md` §0.6。
 
+### 3.10 多 loop accept 分发（U12，2026-10-04）
+
+> 验证 doc166 §1 的容量方向：连接从 accept 起固定同 loop、零迁移。
+
+| 配置（256 连接，2 轮） | K=1 | K=2 | K=4 | K=8 |
+|---|---|---|---|---|
+| reuseport rps | 168–173K | 337–351K（2.0×） | 634–673K（**3.8×**） | 658–684K |
+| dispatch rps | 153–165K | 335–352K | 631–635K | 644–672K |
+| p50（c=256） | 1.4ms | 0.7ms | 0.33ms | 0.33ms |
+
+- **近线性到 K=4，零迁移**；K=8 受客户端（4 线程未绑核）饱和；换 512 连接/
+  8 客户端线程后 reuseport K=8 达 **866K rps**（仍在上扩）；
+- 分布：reuseport 内核 hash 不匀（K=8 accept 22–42/worker），dispatch
+  round-robin 完全均匀；dispatch 的每连接一次性 handoff 被 worker 排队
+  主导（均值 24–849µs），对长连接吞吐无影响；
+- 结论：**accept 时分发是 PEL 多核扩展的最便宜路径**（不搬 handle、不迁移）；
+  两种设计等效，dispatch 更匀、reuseport 更省协调，hash 不匀可 BPF 兜底。
+- 限制：客户端未绑核（K≥8 核争用）；server reqs 读批计数高估 ~20%（以
+  loadgen RESULT 为准）；governor=powersave。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -253,6 +273,7 @@ transport;echo/http c=1/16/256 + UDP echo;记录 p50/p99、`eventfd/req`、
 | S9 | park 次数削减曲线:B=1→8 吞吐 +4~8×、p50 恒定、parks/req 1→0.12 | `bench-logs/bench_echo-20261003-0341*` |
 | S10 | PEL 实测回填(doc165/166):self-wake ~100%→M1 ROI≈0;观测面+机件 +5~7% | PEL `doc165/166`、`test-logs/ebpf-park-*`、`perf-results-cross/*` |
 | S11 | fibre 迁移边界:跨线程 resume 57ns vs 同线程 15ns;栈保持、TLS/句柄随线程 | `bench-logs/bench_l0-20261003-153152.log`、`ctx_migrate` |
+| S12 | accept 分发:reuseport/dispatch K=1→4 近线性(3.8×)、零迁移;K=8 866K rps | `bench-logs/bench_scale-20261004-0054*` |
 
 ## 5. 风险与边界
 

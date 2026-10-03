@@ -138,6 +138,9 @@
 - per-channel listener / SO_REUSEPORT / round-robin 到多 loop：连接从生到
   死都在一个 worker，**不搬 handle、不迁移**；这是 Netty 式答案，也是
   doc166 §1 指向的方向。
+- **U12 已验证（04 §3.10）**：256 连接下 K=1→4 近线性（3.8×、零迁移），
+  K=8 换更大客户端达 866K rps；reuseport（内核 hash 不匀）与单 acceptor
+  round-robin（完全均匀、每连接一次性 handoff）两条路等效。
 - 与 S1/S2 独立：先做 S3 拿容量，S1 并行收敛结构，S2 只在"必须再平衡"
   的证据出现后立项。
 

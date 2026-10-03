@@ -194,6 +194,15 @@ scripts/run-bench.sh release bench_env --iters 200000 --cpu 1
 scripts/run-bench.sh release bench_roundtrip --ops 200000 --wkcpu 1 --prodcpu 2 --flags 32
 scripts/run-bench.sh release bench_fanin --producers 8 --ops 200000 --wkcpu 1 --prodcpu 2 --wait --flags 0
 scripts/run-bench.sh release bench_echo --conns 256 --drivers 4 --ops 20000 --wkcpu 1 --drcpu 2 --ack=park --flags 32
+# U12 多 loop accept 分发(内嵌 PEL loadgen;echo 1KB)
+LG=~/workspace/raw-spofer-pel/polyglot-c/benchmarks/cross/work/loadgen
+scripts/run-bench.sh release bench_scale --workers 4 --dist reuseport --port 23100 \
+    --duration 5 --conns 256 --loadgen $LG
+scripts/run-bench.sh release bench_scale --workers 4 --dist dispatch --port 23100 \
+    --duration 5 --conns 256 --loadgen $LG
+# L0 迁移边界与标定
+scripts/run-bench.sh release bench_l0 --mode migrate --ops 200000
+scripts/run-bench.sh release bench_l0 --mode ring --l0 fibre --fibres 100000 --ops 2000000 --stack 16384
 # 日志: bench-logs/ test-logs/(-latest.log 软链)
 ```
 

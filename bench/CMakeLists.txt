@@ -10,5 +10,8 @@ target_link_libraries(bench_fanin PRIVATE xr)
 add_executable(bench_echo bench_echo.c)
 target_link_libraries(bench_echo PRIVATE xr)
 
+add_executable(bench_scale bench_scale.c)
+target_link_libraries(bench_scale PRIVATE xr)
+
 add_executable(bench_l0 bench_l0.c)
 target_link_libraries(bench_l0 PRIVATE xr)
