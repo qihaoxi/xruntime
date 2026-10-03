@@ -317,6 +317,27 @@ per-core ≈ 0.8–0.9× uv（doc165/166）；无锁语义红利随核数放大�
 2–6M/s；D8 上界 ~0.9µs/req（c=1）。**该模型的理论上界不是"每核 1.0× uv"，
 而是"每核接近 uv + 无锁红利 + 近线性扩展，直到内核/客户端截断"。**
 
+### 3.13 栈分配路线：arena / UFFD-WP guard（U18，2026-10-04）
+
+> 针对"8MB VA/fibre + 2 VMA/fibre + 创建 51×"的栈式规模税。
+
+| 指标（16KB 栈） | mmap+guard | arena（无 guard） | arena+UFFD-WP guard |
+|---|---|---|---|
+| 创建 ns/个 | 7544–8263 | **340–428** | 9825–10517 |
+| VMA @30K | 60023（2/个） | 26 | 28 |
+| VMA @100K | 撞墙（65530） | **26** | 28 |
+| ring rtt p50 | 3516（30K） | 3626（100K，+3%） | 3687（100K，+5%） |
+| RSS reside @100K | — | 422MB | 822MB（guard 落页） |
+| 溢出保护 | ✅ | ❌ | ✅（faults=1） |
+
+- **相邻匿名映射被内核合并**：无 guard 时 VMA≈O(1)，100K 无需改
+  `max_map_count`；
+- **UFFD-WP 对未 present 页不产生事件**（实测）：guard 必须先 touch 再
+  ioctl → 创建 ~10µs（比 mmap 还慢）+ 每 fibre 1 页 RSS；
+- **结论**：创建 51× 与 VMA 墙可用 arena 消掉（17–24×）；溢出安全要另付
+  （UFFD-WP ~10µs 或 stackless）；建议 release=arena、debug/CI=guard，或
+  100K+ 安全要求下直接 stackless。
+
 ## 4. 执行摘要与证据位置
 
 | 阶段 | 结论 | 日志 |
@@ -334,6 +355,7 @@ per-core ≈ 0.8–0.9× uv（doc165/166）；无锁语义红利随核数放大�
 | S12 | accept 分发:reuseport/dispatch K=1→4 近线性(3.8×)、零迁移;K=8 866K rps | `bench-logs/bench_scale-20261004-0054*` |
 | S13 | 锁-free 语义 per-core:K=8 local 4.8× vs atomic 1.1×(平掉);mutex 单锁上限 | `bench-logs/bench_scale-20261004-0117*` |
 | S14 | U13b-d:跨 loop 消息 0.36–2.9µs/2–6M msg/s;16 核峰值 K=8(1.1M,sys 90%);D8 上界 ~0.9µs/req | `bench-logs/bench_{l0,echo,fanin,scale}-20261004-0126*` |
+| S15 | U18 栈分配:arena 创建 340–428ns/VMA≈O(1);UFFD-WP guard 10µs 但可捕获溢出 | `bench-logs/bench_l0-u18-*.log`、`ctx_uffd` |
 
 ## 5. 风险与边界
 

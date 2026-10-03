@@ -208,6 +208,9 @@ scripts/run-bench.sh release bench_scale --workers 8 --dist reuseport --port 231
 # L0 迁移边界与标定
 scripts/run-bench.sh release bench_l0 --mode migrate --ops 200000
 scripts/run-bench.sh release bench_l0 --mode ring --l0 fibre --fibres 100000 --ops 2000000 --stack 16384
+# U18 栈分配:arena(无 guard,VMA≈O(1)) / arena-guard(UFFD-WP,需 sudo)
+scripts/run-bench.sh release bench_l0 --mode create --l0 fibre --stack-alloc arena --ops 100000 --stack 16384
+sudo -n ./build-release/tests/test_ctx_uffd   # 溢出捕获(faults=1)
 # D8 self-wake 代理:同线程 eventfd 写→epoll 返回→drain
 scripts/run-bench.sh release bench_l0 --mode wake --ops 2000000
 # U13c 饱和点:bench_scale 内建 getrusage(server CPU/req、nvcsw)

@@ -27,8 +27,9 @@
  *  --mode=migrate: fibre 跨线程迁移边界(切换易/所有权难):同一 ctx 由 A/B
  *                 交替 resume;报 pure resume(切换)与 wall(含跨线程交接);
  *                 并探测 local 栈变量/线程 id/TLS/线程局部地址的迁移语义。
- *   bench_l0 [--mode calib|create|ring|migrate] [--l0 stackless|fibre]
- *            [--ops N] [--fibres N] [--stack BYTES] [--wkcpu C] [--prodcpu C]
+ *   bench_l0 [--mode calib|create|ring|migrate|wake] [--l0 stackless|fibre]
+ *            [--ops N] [--fibres N] [--stack BYTES]
+ *            [--stack-alloc mmap|arena|arena-guard]
  */
 
 static _Atomic int calib_done;
@@ -46,6 +47,24 @@ static void calib_target(void)
 	atomic_store_explicit(&calib_done, 1, memory_order_release);
 	xr_cpu_switch(&calib_sp, main_sp);
 	abort(); /* main 不再切回 */
+}
+
+static int count_vmas(void)
+{
+	FILE *f = fopen("/proc/self/maps", "r");
+	char line[256];
+	int n = 0;
+
+	if (f == NULL)
+	{
+		return -1;
+	}
+	while (fgets(line, sizeof(line), f) != NULL)
+	{
+		n++;
+	}
+	(void)fclose(f);
+	return n;
 }
 
 static void print_rss(const char *tag)
@@ -69,7 +88,7 @@ static void print_rss(const char *tag)
 			n++;
 		}
 	}
-	printf("%s\n", n == 0 ? " (unavailable)" : "");
+	printf(" vma=%d%s\n", count_vmas(), n == 0 ? " (status unavailable)" : "");
 	(void)fclose(f);
 }
 
@@ -779,6 +798,23 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[i], "--stack") == 0 && i + 1 < argc)
 		{
 			stack = (size_t)strtoull(argv[++i], NULL, 0);
+		}
+		else if (strcmp(argv[i], "--stack-alloc") == 0 && i + 1 < argc)
+		{
+			const char *m = argv[++i];
+
+			if (strcmp(m, "arena") == 0)
+			{
+				xr_ctx_set_alloc(XR_CTX_ALLOC_ARENA, 0);
+			}
+			else if (strcmp(m, "arena-guard") == 0)
+			{
+				xr_ctx_set_alloc(XR_CTX_ALLOC_ARENA_GUARD, 0);
+			}
+			else
+			{
+				xr_ctx_set_alloc(XR_CTX_ALLOC_MMAP, 0);
+			}
 		}
 	}
 

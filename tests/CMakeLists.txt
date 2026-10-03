@@ -23,4 +23,8 @@ if(XR_SANITIZE STREQUAL "none")
   add_executable(test_ctx_migrate test_ctx_migrate.c)
   target_link_libraries(test_ctx_migrate PRIVATE xr)
   add_test(NAME ctx_migrate COMMAND test_ctx_migrate)
+
+  add_executable(test_ctx_uffd test_ctx_uffd.c)
+  target_link_libraries(test_ctx_uffd PRIVATE xr)
+  add_test(NAME ctx_uffd COMMAND test_ctx_uffd)
 endif()

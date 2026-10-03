@@ -364,6 +364,28 @@ S14 验证(U13b-d 跨 loop 消息/16 核饱和/D8 上界;2026-10-04,release):
   `bench_fanin-20261004-012617~012625`、
   `bench_scale-20261004-012626~012651`。
 
+S15 验证(U18 栈分配 arena / UFFD-WP guard;2026-10-04,release,16KB 栈):
+- 实现:`xr_ctx_set_alloc(MMAP|ARENA|ARENA_GUARD)`——ARENA 进程级 bump
+  (默认 4GB VA,NORESERVE,按需增长)+空闲链;ARENA_GUARD 用 UFFD-WP 保护页
+  (不拆 VMA;需 unprivileged_userfaultfd 或 CAP_SYS_PTRACE,不可用自动降级);
+  `bench_l0 --stack-alloc`;`test_ctx_uffd` 溢出捕获(sudo 下 faults=1)。
+- 结果:
+  | 指标 | mmap+guard | arena | arena+UFFD-WP |
+  |---|---|---|---|
+  | 创建 ns/个 | 7544~8263 | **340~428** | 9825~10517 |
+  | VMA @30K | 60023(2/个) | 26 | 28 |
+  | VMA @100K | 撞墙(65530) | **26** | 28 |
+  | ring rtt p50 | 3516(30K) | 3626(100K,+3%) | 3687(100K,+5%) |
+  | RSS reside 100K | — | 422MB | 822MB(guard 落页) |
+  | 溢出保护 | ✅ | ❌ | ✅ |
+- 关键事实:相邻匿名映射被内核合并 → 无 guard 时 **VMA≈O(1)**(100K 无需
+  改 max_map_count);**WP 对未 present 页不产生事件**(实测)→ guard 必须
+  先 touch 再 ioctl,创建 ~10µs(比 mmap 还慢)+ 每 fibre 1 页 RSS。
+- 结论:创建 51× 与 VMA 墙可用 arena 消掉(17~24×);溢出安全要另付
+  (UFFD-WP ~10µs 或 stackless);建议 release=arena、debug/CI=guard,或
+  100K+ 安全要求下直接 stackless。
+- 日志:`bench-logs/bench_l0-u18-*.log`;测试 `ctx_uffd`。
+
 ## 5. 风险与边界
 
 - stackless 续体 ≠ PEL stackful fibre:已做 L0 对照(S7/S8):每次切换差

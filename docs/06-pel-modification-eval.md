@@ -222,6 +222,30 @@ per-core成本 = loop调度 + IO/syscall + park/wake + 业务
 - **U13c** 16 核 scaling 饱和点 ✅（04 §3.12：K=8 峰值，内核/客户端截断）；
 - **U13d** D8 self-wake 上界 ✅（04 §3.12：757ns×1.21 ≈ 0.92µs/req）。
 
+### 0.8 栈分配路线（U18，2026-10-04）
+
+> 针对 stackful 的三项规模税：8MB VA/fibre、2 VMA/fibre、创建 51×。
+
+| 指标（16KB 栈） | mmap+guard | arena（无 guard） | arena+UFFD-WP |
+|---|---|---|---|
+| 创建 ns/个 | 7544–8263 | **340–428** | 9825–10517 |
+| VMA @30K / @100K | 60023 / 撞墙 | 26 / **26** | 28 / 28 |
+| ring rtt p50 | 3516（30K） | 3626（100K） | 3687（100K） |
+| RSS reside @100K | — | 422MB | 822MB |
+| 溢出保护 | ✅ | ❌ | ✅ |
+
+- **关键机制**：相邻匿名映射被内核合并 → 无 guard 时 VMA≈O(1)（guard 的
+  PROT_NONE 分界是 VMA 唯一来源）；**UFFD-WP 对未 present 页不产生事件**
+  （实测）→ guard 必须 touch+ioctl，创建 ~10µs、每 fibre 1 页 RSS；
+- **决策**：
+  1. **release=arena 无 guard**：创建 340ns、VMA≈O(1)、rtt +3%；接受
+     溢出风险（或仅对显式申请大栈的 fibre 加 guard）；
+  2. **debug/CI=arena+UFFD-WP**（或 mmap+guard）：捕获溢出；
+  3. **100K+ 且必须安全**：UFFD-WP（10µs/个）或 **stackless**（无栈，
+     顺带解决动态增长/可迁移）；
+- **对 PEL**：8MB 默认栈应改为"上限/显式申请"（默认 64–128KB）；池化+
+  arena 消掉创建/VMA 墙；安全与动态增长二选一，最终指向 stackless。
+
 ---
 
 ## 1. 问题定义与目标
